@@ -15,14 +15,16 @@ template <typename RawVoxTy> class RawVolume {
     dpbxvdb::Tree vdb;
 
   public:
-    RawVolume() { vdb.Configure({4, 4, 5}); }
     const auto &GetVDB() const { return vdb; }
-    void LoadAsDense(const std::string &path, const glm::uvec3 &dim) {
+    void LoadAsDense(const std::string &path, const glm::uvec3 &dim, bool useDPBX) {
         auto src = loadSrc(path, dim);
+        vdb.Configure({4, 4, 5}, 1, useDPBX);
         vdb.RebuildAsDense(src, dim);
     }
-    void LoadAsSparse(const std::string &path, const glm::uvec3 &dim, const RawVoxTy &threshold) {
+    void LoadAsSparse(const std::string &path, const glm::uvec3 &dim, const RawVoxTy &threshold,
+                      bool useDPBX) {
         auto src = loadSrc(path, dim);
+        vdb.Configure({4, 4, 5}, 1, useDPBX);
         vdb.RebuildAsSparse(src, dim, rawVoxTy2Float(threshold));
     }
 

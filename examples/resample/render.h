@@ -22,15 +22,14 @@ struct RenderParam {
     float dt;
 };
 
-enum class RenderTarget { DenseVol = 0, SparseVol, TileL0, TileL1, TileL2, End };
+enum class RenderTarget { Vol, BrickL0, BrickL1, BrickL2, Depth, End };
 
-constexpr std::array RenderTargetNames{"DenseVol", "SparseVol", "TileL0", "TileL1", "TileL2"};
+constexpr std::array RenderTargetNames{"Volume", "Brick L0", "Brick L1", "Brick L2", "Depth"};
 
 void release();
 void setRenderParam(const RenderParam &param);
-void setVolume();
+void setDPBXParam(const dpbxvdb::VDBInfo &vdbInfo, const dpbxvdb::VDBDeviceData &vdbDat);
 void setTF(const std::vector<float> &flatTF);
-void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget,
-            const dpbxvdb::Tree &vdb);
+void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget);
 
 #endif // !KOUEK_MAIN_H

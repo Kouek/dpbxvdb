@@ -83,12 +83,14 @@ struct dpbxvdb_align VDBInfo {
     bool useDPBX;
     CoordValTy dims[MaxLevNum];
     CoordValTy voxPerAtlasBrick;
+    CoordValTy minDepIdx;
+    CoordValTy maxDepIdx;
     IDTy brickNumPerAtlas;
     CoordTy voxPerVol;
     CoordTy voxPerAtlas;
     CoordTy brickPerVol;
     CoordTy brickPerAtlas;
-    glm::vec3 tDlts[MaxLevNum];
+    glm::vec3 vDlts[MaxLevNum];
 
     __dpbxvdb_hostdev__ ChildIdxTy PosInBrick2ChildIdx(const CoordTy &pos, uint8_t lev) const {
         return (((pos.z << log2Dims[lev]) + pos.y) << log2Dims[lev]) + pos.x;
@@ -105,7 +107,7 @@ struct dpbxvdb_align VDBInfo {
         return (static_cast<IDTy>(idx3.z) * brickPerAtlas.y + idx3.y) * brickPerAtlas.x + idx3.x;
     }
     __dpbxvdb_hostdev__ CoordTy AtlasBrickID2Idx3(IDTy id) const {
-        auto z = id / static_cast<IDTy>(brickPerAtlas.x * brickPerAtlas.y);
+        auto z = id / (static_cast<IDTy>(brickPerAtlas.x) * brickPerAtlas.y);
         auto xyz = z * brickPerAtlas.x * brickPerAtlas.y;
         auto y = (id - xyz) / brickPerAtlas.x;
         auto xy = y * brickPerAtlas.x;
@@ -120,56 +122,61 @@ struct dpbxvdb_align VDBDeviceData {
 
     cudaSurfaceObject_t atlasSurf;
     cudaTextureObject_t atlasTex;
+    cudaTextureObject_t atlasDepTex;
 };
 
-struct HDDA {
-    glm::ivec3 sign3; // signs of ray dir
-    glm::ivec3 mask3; // 0 for should NOT and 1 for should move on XYZ axis
-    CoordTy chIdx3;   // index of child node relative to parent node
-    glm::vec3 t;      // (current time, next time, hit status)
-    glm::vec3 tSide;  // time that ray intersects with next plane in XYZ direction
-    glm::vec3 pos;    // ray pos in Index Space
-    glm::vec3 dir;    // ray dir in Index Space
-    glm::vec3 tDlt;   // time delta
+struct HDDA3D {
+    glm::ivec3 sign; // signs of ray dir
+    glm::ivec3 mask; // 0 for should NOT and 1 for should move on XYZ axis
+    CoordTy chIdx3;  // index of child node relative to parent node
+    glm::vec3 t;     // (current time, next time, hit status)
+    glm::vec3 tSide; // time that ray intersects with next plane in XYZ direction
+    glm::vec3 pos;   // ray pos in Index Space
+    glm::vec3 dir;   // ray dir in Index Space
+    glm::vec3 tDlt;  // time delta
 
-    __dpbxvdb_hostdev__ void InitFromRay(const glm::vec3 &rayPos, const glm::vec3 &rayDir,
-                                         const glm::vec3 &t) {
+    __dpbxvdb_hostdev__ void Init(const glm::vec3 &rayPos, const glm::vec3 &rayDir,
+                                  const glm::vec3 &t) {
         pos = rayPos;
         dir = rayDir;
-        sign3 = {dir.x > 0.f   ? 1
-                 : dir.x < 0.f ? -1
-                               : 0,
-                 dir.y > 0.f   ? 1
-                 : dir.y < 0.f ? -1
-                               : 0,
-                 dir.z > 0.f   ? 1
-                 : dir.z < 0.f ? -1
-                               : 0};
+        sign = {dir.x > 0.f   ? 1
+                : dir.x < 0.f ? -1
+                              : 0,
+                dir.y > 0.f   ? 1
+                : dir.y < 0.f ? -1
+                              : 0,
+                dir.z > 0.f   ? 1
+                : dir.z < 0.f ? -1
+                              : 0};
         this->t = t;
     }
 
     __dpbxvdb_hostdev__ void Prepare(const glm::vec3 &vMin, const glm::vec3 &vDlt) {
         tDlt = glm::abs(vDlt / dir);
         auto pFlt = (pos + t.x * dir - vMin) / vDlt;
-        tSide = ((glm::floor(pFlt) - pFlt + .5f) * glm::vec3{sign3} + .5f) * tDlt + t.x;
+        tSide = ((glm::floor(pFlt) - pFlt + .5f) * glm::vec3{sign} + .5f) * tDlt + t.x;
         chIdx3 = glm::floor(pFlt);
     }
 
     __dpbxvdb_hostdev__ void Next() {
         using GLMIntTy = decltype(glm::ivec3::x);
-        mask3.x = static_cast<GLMIntTy>((tSide.x < tSide.y) & (tSide.x <= tSide.z));
-        mask3.y = static_cast<GLMIntTy>((tSide.y < tSide.z) & (tSide.y <= tSide.x));
-        mask3.z = static_cast<GLMIntTy>((tSide.z < tSide.x) & (tSide.z <= tSide.y));
-        t.y = mask3.x ? tSide.x : (mask3.y ? tSide.y : tSide.z);
+        mask.x = static_cast<GLMIntTy>((tSide.x < tSide.y) & (tSide.x <= tSide.z));
+        mask.y = static_cast<GLMIntTy>((tSide.y < tSide.z) & (tSide.y <= tSide.x));
+        mask.z = static_cast<GLMIntTy>((tSide.z < tSide.x) & (tSide.z <= tSide.y));
+        t.y = mask.x ? tSide.x : mask.y ? tSide.y : tSide.z;
     }
 
     __dpbxvdb_hostdev__ void Step() {
         t.x = t.y;
-        tSide.x = isinf(tDlt.x) ? tDlt.x : mask3.x ? tSide.x + tDlt.x : tSide.x;
-        tSide.y = isinf(tDlt.y) ? tDlt.y : mask3.y ? tSide.y + tDlt.y : tSide.y;
-        tSide.z = isinf(tDlt.z) ? tDlt.z : mask3.z ? tSide.z + tDlt.z : tSide.z;
-        chIdx3 += mask3 * sign3;
+        tSide.x = isinf(tDlt.x) ? tDlt.x : mask.x ? tSide.x + tDlt.x : tSide.x;
+        tSide.y = isinf(tDlt.y) ? tDlt.y : mask.y ? tSide.y + tDlt.y : tSide.y;
+        tSide.z = isinf(tDlt.z) ? tDlt.z : mask.z ? tSide.z + tDlt.z : tSide.z;
+        chIdx3 += mask * sign;
     }
+};
+
+struct DPBXDDA2D {
+    
 };
 
 inline __dpbxvdb_hostdev__ glm::vec3 rayIntersectAABB(const glm::vec3 &rayPos,

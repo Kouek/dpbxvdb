@@ -24,6 +24,10 @@ static __constant__ CURenderParam dc_rndr;
 static cudaTextureObject_t tf = 0;
 static __constant__ cudaTextureObject_t dc_tf;
 
+static dpbxvdb::VDBInfo vdbInfo;
+static __constant__ dpbxvdb::VDBInfo dc_vdbInfo;
+static __constant__ dpbxvdb::VDBDeviceData dc_vdbDat;
+
 void release() {
     if (rndrTexRes != nullptr) {
         CUDACheck(cudaGraphicsUnregisterResource(rndrTexRes));
@@ -47,7 +51,11 @@ void setRenderParam(const RenderParam &param) {
     resDesc.resType = cudaResourceTypeArray;
 }
 
-void setVolume() {}
+void setDPBXParam(const dpbxvdb::VDBInfo &vdbInfo_, const dpbxvdb::VDBDeviceData &vdbDat) {
+    vdbInfo = vdbInfo_;
+    CUDACheck(cudaMemcpyToSymbol(dc_vdbInfo, &vdbInfo, sizeof(vdbInfo)));
+    CUDACheck(cudaMemcpyToSymbol(dc_vdbDat, &vdbDat, sizeof(vdbDat)));
+}
 
 void setTF(const std::vector<float> &flatTF) {
     if (tf != 0)
@@ -109,14 +117,7 @@ inline __device__ void mixForeBackGround(glm::vec3 &rgb, float a) {
     rgb = a * rgb + (1.f - a) * dc_rndr.bkgrndCol;
 }
 
-__global__ void renderDenseKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot) {
-    glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
-    if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
-        return;
-}
-
-__global__ void renderSparseKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot,
-                                   dpbxvdb::VDBInfo vdbInfo, dpbxvdb::VDBDeviceData vdbDat) {
+__global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot) {
     using namespace dpbxvdb;
 
     glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
@@ -124,38 +125,39 @@ __global__ void renderSparseKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos
         return;
 
     auto rayDir = pix2RayDir(pix, camRot);
-    const auto AABBMax = glm::vec3(vdbInfo.voxPerVol);
+    const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
     if (tStart.z < 0.f) {
         surf2Dwrite(glmVec3ToUChar4(dc_rndr.bkgrndCol), outSurf, pix.x * sizeof(uchar4), pix.y);
         return;
     }
 
-    auto lev = vdbInfo.topLev;
+    auto lev = dc_vdbInfo.topLev;
+    float voxPerBrick = dc_vdbInfo.dims[0];
     float tMax[MaxLevNum];
     tStart.x += Epsilon;
     tMax[lev] = tStart.y - Epsilon;
 
     IDTy nodeIdxStk[MaxLevNum];
-    auto &node = vdbDat.nodePools[lev][0];
+    auto &node = dc_vdbDat.nodePools[lev][0];
     nodeIdxStk[lev] = 0;
 
-    HDDA hdda;
-    hdda.InitFromRay(camPos, rayDir, tStart);
-    hdda.Prepare(node.idx3, vdbInfo.tDlts[lev]);
+    HDDA3D hdda;
+    hdda.Init(camPos, rayDir, tStart);
+    hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
 
     auto rgb = glm::zero<glm::vec3>();
     auto alpha = 0.f;
+
     auto brickFn = [&](float t) {
         t = dc_rndr.dt * glm::ceil(t / dc_rndr.dt);
-        auto &leaf = vdbDat.nodePools[0][nodeIdxStk[0]];
+        auto &leaf = dc_vdbDat.nodePools[0][nodeIdxStk[0]];
         glm::vec3 aMin = leaf.atlasIdx3;
         auto posInBrick = camPos + t * rayDir - glm::vec3{leaf.idx3};
         auto dPos = dc_rndr.dt * rayDir;
 
-        auto voxPerBrick = static_cast<float>(vdbInfo.dims[0]);
         while (true) {
-            auto stop = false;
+            auto stop = t > tMax[0];
 #pragma unroll
             for (uint8_t xyz = 0; xyz < 3; ++xyz)
                 if (posInBrick[xyz] < 0.f || posInBrick[xyz] >= voxPerBrick) {
@@ -165,7 +167,7 @@ __global__ void renderSparseKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos
             if (stop)
                 break;
 
-            auto v = tex3D<float>(vdbDat.atlasTex, aMin.x + posInBrick.x, aMin.y + posInBrick.y,
+            auto v = tex3D<float>(dc_vdbDat.atlasTex, aMin.x + posInBrick.x, aMin.y + posInBrick.y,
                                   aMin.z + posInBrick.z);
             integralColor(rgb, alpha, v);
 
@@ -175,10 +177,10 @@ __global__ void renderSparseKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos
     };
 
     while (true) {
-        auto stop = lev > vdbInfo.topLev;
+        auto stop = lev > dc_vdbInfo.topLev;
 #pragma unroll
         for (uint8_t xyz = 0; xyz < 3; ++xyz)
-            if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= vdbInfo.dims[lev]) {
+            if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
                 stop = true;
                 break;
             }
@@ -186,29 +188,30 @@ __global__ void renderSparseKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos
             break;
 
         hdda.Next();
-        auto chIdx = vdbInfo.PosInBrick2ChildIdx(hdda.chIdx3, lev);
-        if (IsChildOn(vdbDat, node, chIdx)) {
+        auto chIdx = dc_vdbInfo.PosInBrick2ChildIdx(hdda.chIdx3, lev);
+        if (IsChildOn(dc_vdbDat, node, chIdx)) {
             if (lev == 1) {
-                nodeIdxStk[0] = Node::ID2Idx(GetChildID(vdbDat, node, chIdx));
+                nodeIdxStk[0] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
                 hdda.t.x += Epsilon;
+                tMax[0] = hdda.t.y - Epsilon;
                 brickFn(hdda.t.x);
                 hdda.Step();
             } else {
                 --lev;
-                nodeIdxStk[lev] = Node::ID2Idx(GetChildID(vdbDat, node, chIdx));
-                node = vdbDat.nodePools[lev][nodeIdxStk[lev]];
+                nodeIdxStk[lev] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
+                node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
                 hdda.t.x += Epsilon;
                 tMax[lev] = hdda.t.y - Epsilon;
-                hdda.Prepare(node.idx3, vdbInfo.tDlts[lev]);
+                hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
             }
         } else
             hdda.Step();
 
-        while (hdda.t.x > tMax[lev] && lev <= vdbInfo.topLev) {
+        while (hdda.t.x > tMax[lev] && lev <= dc_vdbInfo.topLev) {
             ++lev;
-            if (lev <= vdbInfo.topLev) {
-                node = vdbDat.nodePools[lev][nodeIdxStk[lev]];
-                hdda.Prepare(node.idx3, vdbInfo.tDlts[lev]);
+            if (lev <= dc_vdbInfo.topLev) {
+                node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
+                hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
             }
         }
     }
@@ -217,9 +220,10 @@ __global__ void renderSparseKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos
     surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
 }
 
-__global__ void renderTileKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot,
-                                 uint8_t drawLev, dpbxvdb::VDBInfo vdbInfo,
-                                 dpbxvdb::VDBDeviceData vdbDat) {
+__global__ void renderKernelDPBX(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot) {}
+
+__global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot,
+                                  uint8_t drawLev) {
     using namespace dpbxvdb;
 
     glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
@@ -227,39 +231,39 @@ __global__ void renderTileKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, 
         return;
 
     auto rayDir = pix2RayDir(pix, camRot);
-    const auto AABBMax = glm::vec3(vdbInfo.voxPerVol);
+    const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
     if (tStart.z < 0.f) {
         surf2Dwrite(glmVec3ToUChar4(dc_rndr.bkgrndCol), outSurf, pix.x * sizeof(uchar4), pix.y);
         return;
     }
 
-    auto lev = vdbInfo.topLev;
+    auto lev = dc_vdbInfo.topLev;
     float tMax[MaxLevNum];
     tStart.x += Epsilon;
     tMax[lev] = tStart.y - Epsilon;
 
     IDTy nodeIdxStk[MaxLevNum];
-    auto &node = vdbDat.nodePools[lev][0];
+    auto &node = dc_vdbDat.nodePools[lev][0];
     nodeIdxStk[lev] = 0;
 
-    HDDA hdda;
-    hdda.InitFromRay(camPos, rayDir, tStart);
-    hdda.Prepare(node.idx3, vdbInfo.tDlts[lev]);
+    HDDA3D hdda;
+    hdda.Init(camPos, rayDir, tStart);
+    hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
 
     auto rgb = glm::zero<glm::vec3>();
     auto alpha = 0.f;
     if (drawLev == lev) {
         auto p = camPos + hdda.t.x * rayDir;
-        glm::vec3 rng = vdbInfo.voxPerVol;
+        glm::vec3 rng = dc_vdbInfo.voxPerVol;
         rgb = p / rng;
         alpha = 1.f;
     } else
         while (true) {
-            auto stop = lev > vdbInfo.topLev;
+            auto stop = lev > dc_vdbInfo.topLev;
 #pragma unroll
             for (uint8_t xyz = 0; xyz < 3; ++xyz)
-                if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= vdbInfo.dims[lev]) {
+                if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
                     stop = true;
                     break;
                 }
@@ -267,30 +271,30 @@ __global__ void renderTileKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, 
                 break;
 
             hdda.Next();
-            auto chIdx = vdbInfo.PosInBrick2ChildIdx(hdda.chIdx3, lev);
-            if (IsChildOn(vdbDat, node, chIdx)) {
+            auto chIdx = dc_vdbInfo.PosInBrick2ChildIdx(hdda.chIdx3, lev);
+            if (IsChildOn(dc_vdbDat, node, chIdx)) {
                 if (lev == drawLev + 1 || lev <= 1) {
                     auto p = camPos + hdda.t.x * rayDir;
-                    glm::vec3 rng = vdbInfo.voxPerVol;
+                    glm::vec3 rng = dc_vdbInfo.voxPerVol;
                     rgb = p / rng;
                     alpha = 1.f;
                     break;
                 } else {
                     --lev;
-                    nodeIdxStk[lev] = Node::ID2Idx(GetChildID(vdbDat, node, chIdx));
-                    node = vdbDat.nodePools[lev][nodeIdxStk[lev]];
+                    nodeIdxStk[lev] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
+                    node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
                     hdda.t.x += Epsilon;
                     tMax[lev] = hdda.t.y - Epsilon;
-                    hdda.Prepare(node.idx3, vdbInfo.tDlts[lev]);
+                    hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
                 }
             } else
                 hdda.Step();
 
-            while (hdda.t.x > tMax[lev] && lev <= vdbInfo.topLev) {
+            while (hdda.t.x > tMax[lev] && lev <= dc_vdbInfo.topLev) {
                 ++lev;
-                if (lev <= vdbInfo.topLev) {
-                    node = vdbDat.nodePools[lev][nodeIdxStk[lev]];
-                    hdda.Prepare(node.idx3, vdbInfo.tDlts[lev]);
+                if (lev <= dc_vdbInfo.topLev) {
+                    node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
+                    hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
                 }
             }
         }
@@ -299,8 +303,84 @@ __global__ void renderTileKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, 
     surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
 }
 
-void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget,
-            const dpbxvdb::Tree &vdb) {
+__global__ void renderDPBXKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot) {
+    using namespace dpbxvdb;
+
+    glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
+    if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
+        return;
+
+    auto rayDir = pix2RayDir(pix, camRot);
+    const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
+    auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
+    if (!dc_vdbInfo.useDPBX || tStart.z < 0.f) {
+        surf2Dwrite(glmVec3ToUChar4(dc_rndr.bkgrndCol), outSurf, pix.x * sizeof(uchar4), pix.y);
+        return;
+    }
+
+    auto lev = dc_vdbInfo.topLev;
+    float voxPerBrick = dc_vdbInfo.dims[0];
+    float tMax[MaxLevNum];
+    tStart.x += Epsilon;
+    tMax[lev] = tStart.y - Epsilon;
+
+    IDTy nodeIdxStk[MaxLevNum];
+    auto &node = dc_vdbDat.nodePools[lev][0];
+    nodeIdxStk[lev] = 0;
+
+    HDDA3D hdda;
+    hdda.Init(camPos, rayDir, tStart);
+    hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
+
+    auto rgb = glm::zero<glm::vec3>();
+    auto alpha = 0.f;
+    while (true) {
+        auto stop = lev > dc_vdbInfo.topLev;
+#pragma unroll
+        for (uint8_t xyz = 0; xyz < 3; ++xyz)
+            if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
+                stop = true;
+                break;
+            }
+        if (stop)
+            break;
+
+        hdda.Next();
+        auto chIdx = dc_vdbInfo.PosInBrick2ChildIdx(hdda.chIdx3, lev);
+        if (IsChildOn(dc_vdbDat, node, chIdx)) {
+            if (lev == 1) {
+                nodeIdxStk[0] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
+                hdda.t.x += Epsilon;
+
+                auto &leaf = dc_vdbDat.nodePools[0][nodeIdxStk[0]];
+                auto posInBrick = camPos + hdda.t.x * rayDir - glm::vec3{leaf.idx3};
+
+                break;
+            } else {
+                --lev;
+                nodeIdxStk[lev] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
+                node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
+                hdda.t.x += Epsilon;
+                tMax[lev] = hdda.t.y - Epsilon;
+                hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
+            }
+        } else
+            hdda.Step();
+
+        while (hdda.t.x > tMax[lev] && lev <= dc_vdbInfo.topLev) {
+            ++lev;
+            if (lev <= dc_vdbInfo.topLev) {
+                node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
+                hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
+            }
+        }
+    }
+
+    mixForeBackGround(rgb, alpha);
+    surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
+}
+
+void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget) {
     cudaGraphicsMapResources(1, &rndrTexRes);
 
     cudaGraphicsSubResourceGetMappedArray(&resDesc.res.array.array, rndrTexRes, 0, 0);
@@ -311,20 +391,21 @@ void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrT
     dim3 grid{((decltype(dim3::x))rndr.res.x + block.x - 1) / block.x,
               ((decltype(dim3::y))rndr.res.y + block.y - 1) / block.y};
     switch (rndrTarget) {
-    case RenderTarget::DenseVol:
-        renderDenseKernel<<<grid, block>>>(outSurf, camPos, camRot);
+    case RenderTarget::Vol:
+        if (vdbInfo.useDPBX)
+            renderKernelDPBX<<<grid, block>>>(outSurf, camPos, camRot);
+        else
+            renderKernel<<<grid, block>>>(outSurf, camPos, camRot);
         break;
-    case RenderTarget::SparseVol:
-        renderSparseKernel<<<grid, block>>>(outSurf, camPos, camRot, vdb.GetInfo(),
-                                            vdb.GetDeviceData());
+    case RenderTarget::BrickL0:
+    case RenderTarget::BrickL1:
+    case RenderTarget::BrickL2:
+        renderBrickKernel<<<grid, block>>>(outSurf, camPos, camRot,
+                                           static_cast<uint8_t>(rndrTarget) -
+                                               static_cast<uint8_t>(RenderTarget::BrickL0));
         break;
-    case RenderTarget::TileL0:
-    case RenderTarget::TileL1:
-    case RenderTarget::TileL2:
-        renderTileKernel<<<grid, block>>>(outSurf, camPos, camRot,
-                                          static_cast<uint8_t>(rndrTarget) -
-                                              static_cast<uint8_t>(RenderTarget::TileL0),
-                                          vdb.GetInfo(), vdb.GetDeviceData());
+    case RenderTarget::Depth:
+        renderDPBXKernel<<<grid, block>>>(outSurf, camPos, camRot);
         break;
     }
 

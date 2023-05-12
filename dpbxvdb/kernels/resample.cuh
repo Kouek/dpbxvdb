@@ -11,8 +11,8 @@
 
 namespace dpbxvdb {
 
-void resample(const thrust::device_vector<float> &d_src, cudaSurfaceObject_t dstSurf,
-              float threshold, const VDBInfo &vdbInfo, const VDBDeviceData &vdbDat);
+void resample(const thrust::device_vector<float> &d_src, float threshold, const VDBInfo &vdbInfo,
+              const VDBDeviceData &vdbDat);
 
 }
 

@@ -23,7 +23,10 @@ static glm::uvec3 volDim;
 static DpbxRawVoxTy volThresh;
 
 static RenderParam rndr;
-static RenderTarget rndrTarget = RenderTarget::SparseVol;
+static RenderTarget rndrTarget = RenderTarget::Vol;
+
+static auto isSparse = true;
+static auto useDPBX = false;
 
 static auto reRndr = true;
 constexpr auto ReRndrCntDownInterval = static_cast<std::chrono::milliseconds>(100);
@@ -49,7 +52,7 @@ static void changeRenderParam(int width, int height) {
     rndr.res.y = height;
     rndr.proj = glm::perspectiveFov(glm::radians(60.f), (float)width, (float)height,
                                     .01f * camFarClip, camFarClip);
-    rndr.bkgrndCol = glm::vec3{.1f, .1f, .2f};
+    rndr.bkgrndCol = glm::vec3{.3f, .3f, .3f};
     rndr.thresh = volThresh / (float)std::numeric_limits<DpbxRawVoxTy>::max();
     rndr.dt = .25f;
 
@@ -129,17 +132,10 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
 }
 
 static void loadVol() {
-    switch (rndrTarget) {
-    case RenderTarget::DenseVol:
-        volume.LoadAsDense(volPath, volDim);
-        break;
-    case RenderTarget::SparseVol:
-    case RenderTarget::TileL0:
-    case RenderTarget::TileL1:
-    case RenderTarget::TileL2:
-        volume.LoadAsSparse(volPath, volDim, volThresh);
-        break;
-    }
+    if (isSparse)
+        volume.LoadAsSparse(volPath, volDim, volThresh, useDPBX);
+    else
+        volume.LoadAsDense(volPath, volDim, useDPBX);
     static auto first = true;
     if (first) {
         camera.LookAt({0.5f * volDim.x, 0.5f * volDim.y, 2.f * volDim.z},
@@ -149,8 +145,8 @@ static void loadVol() {
 
         first = false;
     }
-    
-    setVolume();
+
+    setDPBXParam(volume.GetVDB().GetInfo(), volume.GetVDB().GetDeviceData());
 }
 
 int main(int argc, char **argv) {
@@ -248,7 +244,7 @@ int main(int argc, char **argv) {
 
         if (reRndr) {
             const auto &[R, F, U, P] = camera.GetRFUP();
-            render(P, glm::mat3{R, U, -F}, rndrTarget, volume.GetVDB());
+            render(P, glm::mat3{R, U, -F}, rndrTarget);
             reRndr = false;
         }
 
@@ -262,7 +258,6 @@ int main(int argc, char **argv) {
             }
 
             static auto lastSelected = static_cast<uint8_t>(rndrTarget);
-            static auto lastIsDense = rndrTarget == RenderTarget::DenseVol;
             for (uint8_t i = 0; i < static_cast<uint8_t>(RenderTarget::End); ++i) {
                 if (i != 0)
                     ImGui::SameLine();
@@ -270,14 +265,22 @@ int main(int argc, char **argv) {
                     if (lastSelected != i) {
                         rndrTarget = static_cast<RenderTarget>(i);
                         lastSelected = i;
-
-                        if ((lastIsDense && rndrTarget != RenderTarget::DenseVol) ||
-                            (!lastIsDense && rndrTarget == RenderTarget::DenseVol))
-                            loadVol();
-                        lastIsDense = rndrTarget == RenderTarget::DenseVol;
-
                         reRndr = true;
                     }
+            }
+
+            if (ImGui::RadioButton("Is Sparse", isSparse)) {
+                isSparse = !isSparse;
+                loadVol();
+                reRndr = true;
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::RadioButton("Use DPBX", useDPBX)) {
+                useDPBX = !useDPBX;
+                loadVol();
+                reRndr = true;
             }
         }
         ImGui::EndFrame();

@@ -2,6 +2,7 @@
 #define KOUEK_DPBXVDB_H
 
 #include <array>
+#include <bitset>
 #include <queue>
 #include <tuple>
 #include <vector>
@@ -21,20 +22,25 @@ namespace dpbxvdb {
 
 class Tree {
   private:
-    VDBInfo info;
-    VDBDeviceData devDat;
+    enum class State { NeedRebuild, KeepOldAtlas, End };
+    std::bitset<static_cast<size_t>(State::End)> states;
+    bool testState(State state) const { return states.test(static_cast<size_t>(state)); }
+    void setState(State state, bool val = true) { states.set(static_cast<size_t>(state), val); }
 
     DownsamplePolicy downsamplePolicy = DownsamplePolicy::Avg;
     float scnThresh;
     float tfThresh = 0.f;
     IDTy rootID = UndefID;
-    size_t maxVoxNumPerAtlas;
     std::array<CoordValTy, MaxLevNum> chNums{0, 0, 0};
     std::array<CoordTy, MaxLevNum> coverVoxes;
+
+    VDBInfo info;
+    VDBDeviceData devDat;
 
     cudaArray_t atlasArr = nullptr;
     cudaResourceDesc atlasResDesc;
     cudaTextureObject_t atlasTex;
+    cudaTextureObject_t atlasDepTex = 0;
     cudaSurfaceObject_t atlasSurf;
 
     std::queue<IDTy> availableAtlasBrickIDs;
@@ -48,13 +54,17 @@ class Tree {
     std::array<thrust::device_vector<Node>, MaxLevNum> d_nodePools;
 
   public:
-    Tree() = default;
+    Tree() {
+        memset(&atlasResDesc, 0, sizeof(atlasResDesc));
+        atlasResDesc.resType = cudaResourceTypeArray;
+    }
+    const bool IsReady() const { return !testState(State::NeedRebuild); }
     const auto &GetInfo() const { return info; }
     const auto &GetDeviceData() const { return devDat; }
 
     void Configure(const std::array<uint8_t, MaxLevNum> &log2Dims, uint8_t apronWidth = 1,
-                   bool useDPBX = false, DownsamplePolicy downsamplePolicy = DownsamplePolicy::Max,
-                   size_t maxVoxNumPerAtlas = 1024 * 1024 * 1024) {
+                   bool useDPBX = false,
+                   DownsamplePolicy downsamplePolicy = DownsamplePolicy::Max) {
         this->downsamplePolicy = downsamplePolicy;
 
         for (uint8_t lev = 0; lev < MaxLevNum; ++lev) {
@@ -63,18 +73,18 @@ class Tree {
             chNums[lev] = static_cast<CoordValTy>(info.dims[lev]) * info.dims[lev] * info.dims[lev];
             coverVoxes[lev] =
                 lev > 0 ? info.dims[lev] * coverVoxes[lev - 1] : CoordTy{info.dims[lev]};
-            info.tDlts[lev] = glm::vec3(coverVoxes[lev]) / glm::vec3(info.dims[lev]);
+            info.vDlts[lev] = glm::vec3(coverVoxes[lev]) / glm::vec3(info.dims[lev]);
         }
 
-        this->maxVoxNumPerAtlas = maxVoxNumPerAtlas;
-        info.apronWidth = apronWidth;
-        info.apronWidAndDep = apronWidth + (useDPBX ? 1 : 0);
         info.useDPBX = useDPBX;
+        info.apronWidth = apronWidth;
         info.voxPerAtlasBrick =
-            info.dims[0] + ((static_cast<CoordValTy>(info.apronWidth) + (useDPBX ? 1 : 0)) << 1);
+            info.dims[0] + ((static_cast<CoordValTy>(apronWidth) + (useDPBX ? 1 : 0)) << 1);
+        info.apronWidAndDep = apronWidth + (useDPBX ? 1 : 0);
+        info.minDepIdx = -static_cast<CoordValTy>(info.apronWidAndDep);
+        info.maxDepIdx = info.dims[0] - 1 + info.apronWidAndDep;
 
-        memset(&atlasResDesc, 0, sizeof(atlasResDesc));
-        atlasResDesc.resType = cudaResourceTypeArray;
+        setState(State::NeedRebuild);
     }
 
     void RebuildAsDense(const std::vector<float> &src, const CoordTy &voxPerVol) {
@@ -83,6 +93,9 @@ class Tree {
         info.brickPerVol = {(voxPerVol.x + info.dims[0] - 1) / info.dims[0],
                             (voxPerVol.y + info.dims[0] - 1) / info.dims[0],
                             (voxPerVol.z + info.dims[0] - 1) / info.dims[0]};
+
+        clearHostData();
+
         thrust::device_vector<float> d_src(src);
         {
             for (CoordValTy z = 0; z < info.brickPerVol.z; ++z)
@@ -93,7 +106,10 @@ class Tree {
                         activateSpace(rootID, pos, UndefID, 0);
                     }
         }
+
+        setState(State::KeepOldAtlas, false);
         updateAtlas(d_src);
+        setState(State::NeedRebuild, false);
     }
 
     void RebuildAsSparse(const std::vector<float> &src, const CoordTy &voxPerVol, float threshold) {
@@ -102,6 +118,9 @@ class Tree {
         info.brickPerVol = {(voxPerVol.x + info.dims[0] - 1) / info.dims[0],
                             (voxPerVol.y + info.dims[0] - 1) / info.dims[0],
                             (voxPerVol.z + info.dims[0] - 1) / info.dims[0]};
+
+        clearHostData();
+
         thrust::device_vector<float> d_src(src);
         {
             auto downsampled = downsample(d_src, downsamplePolicy, info);
@@ -116,7 +135,9 @@ class Tree {
                         }
         }
 
+        setState(State::KeepOldAtlas, false);
         updateAtlas(d_src);
+        setState(State::NeedRebuild, false);
     }
 
   private:
@@ -134,8 +155,10 @@ class Tree {
         devDat.atlasMaps = thrust::raw_pointer_cast(d_atlasMaps.data());
         devDat.atlasSurf = atlasSurf;
         devDat.atlasTex = atlasTex;
+        devDat.atlasDepTex = atlasDepTex;
     }
 
+  private:
     ChildIdxTy getChildIndexInNode(IDTy nodeID, const CoordTy &pos) {
         auto &node = getNode(nodeID);
         auto &cover = coverVoxes[node.lev];
@@ -147,12 +170,6 @@ class Tree {
         }
         return UndefChIdx;
     }
-    void clearPools() {
-        for (auto &pool : nodePools)
-            pool.clear();
-        for (auto &pool : d_nodePools)
-            pool.clear();
-    }
     IDTy appendNodeAtPool(uint8_t lev, const CoordTy &idx3) {
         auto &pool = nodePools[lev];
         IDTy idx = pool.size();
@@ -163,6 +180,7 @@ class Tree {
     }
     Node &getNode(IDTy nodeID) { return nodePools[Node::ID2Lev(nodeID)][Node::ID2Idx(nodeID)]; }
 
+  private:
     IDTy getChildID(IDTy parID, ChildIdxTy chIdx) {
         auto &par = getNode(parID);
         return chListPool[par.chList + chIdx];
@@ -226,6 +244,7 @@ class Tree {
         return getNode(leafID).par;
     }
 
+  private:
     IDTy activateSpace(IDTy parID, const CoordTy &pos, IDTy stopNodeID, uint8_t stopLev) {
         if (rootID == UndefID && parID == rootID) {
             auto rootPos = getNodePosCoverPosAtLev(stopLev, pos);
@@ -266,26 +285,32 @@ class Tree {
         }
     }
 
+  private:
     void reserveAtlas(const CoordTy &voxPerAtlasNew) {
-        assert(!atlasArr || (voxPerAtlasNew.x == info.voxPerAtlas.x &&
-                             voxPerAtlasNew.y == info.voxPerAtlas.y),
-               "Atlas can only increase on Z-axis!");
-
-        if (voxPerAtlasNew.z <= info.voxPerAtlas.z)
-            return;
-
         if (atlasResDesc.res.array.array) {
             CUDACheck(cudaDestroyTextureObject(atlasTex));
             CUDACheck(cudaDestroySurfaceObject(atlasSurf));
+            if (atlasDepTex != 0)
+                CUDACheck(cudaDestroyTextureObject(atlasDepTex));
             atlasResDesc.res.array.array = nullptr;
         }
 
+        if (atlasArr &&
+            (info.voxPerAtlas.x != voxPerAtlasNew.x || info.voxPerAtlas.y != voxPerAtlasNew.y)) {
+            // Atlas should only increase on Z-axis
+            CUDACheck(cudaFreeArray(atlasArr));
+            atlasArr = nullptr;
+        }
+
         auto oldArr = atlasArr;
-        auto availableLayerStart = oldArr ? info.brickPerVol.z : static_cast<CoordValTy>(0);
+        auto availableLayerStart = oldArr && testState(State::KeepOldAtlas)
+                                       ? info.brickPerAtlas.z
+                                       : static_cast<CoordValTy>(0);
+
         cudaMemcpy3DParms cp;
+        memset(&cp, 0, sizeof(cp));
         cp.kind = cudaMemcpyDeviceToDevice;
         cp.srcArray = oldArr;
-        cp.dstArray = atlasArr;
         cp.srcPos = cp.dstPos = {0, 0, 0};
         cp.extent.width = info.voxPerAtlas.x;
         cp.extent.height = info.voxPerAtlas.y;
@@ -301,10 +326,15 @@ class Tree {
         info.brickPerAtlas.z = info.voxPerAtlas.z / info.voxPerAtlasBrick;
 
         CUDACheck(cudaMalloc3DArray(&atlasArr, &chnlDesc, extent));
-        if (oldArr)
-            CUDACheck(cudaMemcpy3D(&cp));
+        if (oldArr) {
+            if (testState(State::KeepOldAtlas)) {
+                cp.dstArray = atlasArr;
+                CUDACheck(cudaMemcpy3D(&cp));
+            }
+            CUDACheck(cudaFreeArray(oldArr));
+        }
 
-        for (auto z = availableLayerStart; z < info.brickPerVol.z; ++z)
+        for (auto z = availableLayerStart; z < info.brickPerAtlas.z; ++z)
             for (CoordValTy y = 0; y < info.brickPerAtlas.y; ++y)
                 for (CoordValTy x = 0; x < info.brickPerAtlas.x; ++x)
                     availableAtlasBrickIDs.emplace(info.AtlastBrickIdx32ID({x, y, z}));
@@ -312,12 +342,13 @@ class Tree {
         info.brickNumPerAtlas =
             static_cast<IDTy>(info.brickPerAtlas.x) * info.brickPerAtlas.y * info.brickPerAtlas.z;
         atlasMaps.resize(info.brickNumPerAtlas, UndefAtlasMap);
-    }
 
+        setState(State::KeepOldAtlas);
+    }
     void allocAtlasBrick(IDTy leafID) {
         if (availableAtlasBrickIDs.empty()) {
             auto voxPerAtlasNew = info.voxPerAtlas;
-            ++voxPerAtlasNew.z;
+            voxPerAtlasNew.z += info.voxPerAtlasBrick;
             reserveAtlas(voxPerAtlasNew);
         }
         auto atlasBrickID = availableAtlasBrickIDs.front();
@@ -329,7 +360,6 @@ class Tree {
         getNode(leafID).atlasIdx3 = info.voxPerAtlasBrick * atlasMap.atlasBrickIdx3 +
                                     static_cast<CoordValTy>(info.apronWidAndDep);
     }
-
     void setupAtlasAccess() {
         if (atlasResDesc.res.array.array)
             return;
@@ -344,14 +374,28 @@ class Tree {
         texDesc.readMode = cudaReadModeElementType;
         texDesc.normalizedCoords = 0;
         CUDACheck(cudaCreateTextureObject(&atlasTex, &atlasResDesc, &texDesc, nullptr));
+
+        texDesc.filterMode = cudaFilterModePoint;
+        CUDACheck(cudaCreateTextureObject(&atlasDepTex, &atlasResDesc, &texDesc, nullptr));
+    }
+
+  private:
+    void clearHostData() {
+        for (auto &pool : nodePools)
+            pool.clear();
+        chListPool.clear();
+        atlasMaps.clear();
+        availableAtlasBrickIDs = decltype(availableAtlasBrickIDs)();
+
+        rootID = UndefID;
     }
 
     void updateAtlas(const thrust::device_vector<float> &d_src) {
         auto voxPerAtlasNew = [&]() {
-            auto voxNumPerAtlasLayer = static_cast<size_t>(info.voxPerVol.x) * info.voxPerVol.y;
-            CoordValTy z = maxVoxNumPerAtlas / voxNumPerAtlasLayer;
-            CoordTy ret{info.voxPerVol.x, info.voxPerVol.y, std::min(info.voxPerVol.z, z)};
-            ret += static_cast<CoordValTy>(info.apronWidAndDep);
+            CoordTy ret{info.dims[0] + (static_cast<CoordValTy>(info.apronWidAndDep) << 1)};
+            auto brickPerAtlas = info.brickPerVol;
+            brickPerAtlas.z >>= 1;
+            ret *= brickPerAtlas;
             return ret;
         }();
         reserveAtlas(voxPerAtlasNew);
@@ -362,7 +406,7 @@ class Tree {
 
         setupAtlasAccess();
         uploadDeviceData();
-        resample(d_src, atlasSurf, std::max(scnThresh, tfThresh), info, devDat);
+        resample(d_src, std::max(scnThresh, tfThresh), info, devDat);
     }
 };
 
