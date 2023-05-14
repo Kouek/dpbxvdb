@@ -28,8 +28,6 @@ class Tree {
     void setState(State state, bool val = true) { states.set(static_cast<size_t>(state), val); }
 
     DownsamplePolicy downsamplePolicy = DownsamplePolicy::Avg;
-    float scnThresh;
-    float tfThresh = 0.f;
     IDTy rootID = UndefID;
     std::array<CoordValTy, MaxLevNum> chNums{0, 0, 0};
     std::array<CoordTy, MaxLevNum> coverVoxes;
@@ -88,7 +86,7 @@ class Tree {
     }
 
     void RebuildAsDense(const std::vector<float> &src, const CoordTy &voxPerVol) {
-        scnThresh = 0.f;
+        info.thresh = 0.f;
         info.voxPerVol = voxPerVol;
         info.brickPerVol = {(voxPerVol.x + info.dims[0] - 1) / info.dims[0],
                             (voxPerVol.y + info.dims[0] - 1) / info.dims[0],
@@ -113,7 +111,7 @@ class Tree {
     }
 
     void RebuildAsSparse(const std::vector<float> &src, const CoordTy &voxPerVol, float threshold) {
-        scnThresh = threshold;
+        info.thresh = threshold;
         info.voxPerVol = voxPerVol;
         info.brickPerVol = {(voxPerVol.x + info.dims[0] - 1) / info.dims[0],
                             (voxPerVol.y + info.dims[0] - 1) / info.dims[0],
@@ -128,7 +126,7 @@ class Tree {
                 for (CoordValTy y = 0; y < info.brickPerVol.y; ++y)
                     for (CoordValTy x = 0; x < info.brickPerVol.x; ++x)
                         if (downsampled[(z * info.brickPerVol.y + y) * info.brickPerVol.x + x] >=
-                            scnThresh) {
+                            info.thresh) {
                             CoordTy pos{x, y, z};
                             pos *= info.dims[0];
                             activateSpace(rootID, pos, UndefID, 0);
@@ -406,7 +404,7 @@ class Tree {
 
         setupAtlasAccess();
         uploadDeviceData();
-        resample(d_src, std::max(scnThresh, tfThresh), info, devDat);
+        resample(d_src, info, devDat);
     }
 };
 

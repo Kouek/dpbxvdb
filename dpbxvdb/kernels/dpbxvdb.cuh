@@ -91,6 +91,7 @@ struct dpbxvdb_align VDBInfo {
     CoordTy brickPerVol;
     CoordTy brickPerAtlas;
     glm::vec3 vDlts[MaxLevNum];
+    float thresh;
 
     __dpbxvdb_hostdev__ ChildIdxTy PosInBrick2ChildIdx(const CoordTy &pos, uint8_t lev) const {
         return (((pos.z << log2Dims[lev]) + pos.y) << log2Dims[lev]) + pos.x;
@@ -163,20 +164,110 @@ struct HDDA3D {
         mask.x = static_cast<GLMIntTy>((tSide.x < tSide.y) & (tSide.x <= tSide.z));
         mask.y = static_cast<GLMIntTy>((tSide.y < tSide.z) & (tSide.y <= tSide.x));
         mask.z = static_cast<GLMIntTy>((tSide.z < tSide.x) & (tSide.z <= tSide.y));
-        t.y = mask.x ? tSide.x : mask.y ? tSide.y : tSide.z;
+        t.y = mask.x ? tSide.x : mask.y ? tSide.y : mask.z ? tSide.z : INFINITY;
     }
 
     __dpbxvdb_hostdev__ void Step() {
         t.x = t.y;
-        tSide.x = isinf(tDlt.x) ? tDlt.x : mask.x ? tSide.x + tDlt.x : tSide.x;
-        tSide.y = isinf(tDlt.y) ? tDlt.y : mask.y ? tSide.y + tDlt.y : tSide.y;
-        tSide.z = isinf(tDlt.z) ? tDlt.z : mask.z ? tSide.z + tDlt.z : tSide.z;
+        tSide.x = isinf(tDlt.x) ? INFINITY : mask.x ? tSide.x + tDlt.x : tSide.x;
+        tSide.y = isinf(tDlt.y) ? INFINITY : mask.y ? tSide.y + tDlt.y : tSide.y;
+        tSide.z = isinf(tDlt.z) ? INFINITY : mask.z ? tSide.z + tDlt.z : tSide.z;
         chIdx3 += mask * sign;
     }
 };
 
 struct DPBXDDA2D {
-    
+    float t;
+    float dep;
+    glm::ivec3 depSign;
+    glm::ivec3 sign;
+    glm::ivec3 mask;
+    glm::vec3 tSide;
+    glm::vec3 tDlt;
+    glm::vec3 pos;
+
+    __dpbxvdb_hostdev__ bool Init(const glm::vec3 &rayPos, const glm::vec3 &rayDir, float t,
+                                  const glm::vec3 &posInBrick, const VDBInfo &vdbInfo) {
+        constexpr auto Sqrt2Div2 = 0.70710678f;
+
+        dep = 0.f;
+        pos = posInBrick;
+        sign = {rayDir.x > 0.f   ? 1
+                : rayDir.x < 0.f ? -1
+                                 : 0,
+                rayDir.y > 0.f   ? 1
+                : rayDir.y < 0.f ? -1
+                                 : 0,
+                rayDir.z > 0.f   ? 1
+                : rayDir.z < 0.f ? -1
+                                 : 0};
+        this->t = t;
+
+        {
+            float max = vdbInfo.dims[0] - 1;
+            glm::vec3 distToAxis{sign.x == 0  ? INFINITY
+                                 : sign.x > 0 ? pos.x
+                                              : max - pos.x,
+                                 sign.y == 0  ? INFINITY
+                                 : sign.y > 0 ? pos.y
+                                              : max - pos.y,
+                                 sign.z == 0  ? INFINITY
+                                 : sign.z > 0 ? pos.z
+                                              : max - pos.z};
+            depSign.x = (distToAxis.x <= distToAxis.y && distToAxis.x <= distToAxis.z) ? sign.x : 0;
+            depSign.y = (distToAxis.y <= distToAxis.z && distToAxis.y <= distToAxis.x) ? sign.y : 0;
+            depSign.z = (distToAxis.z <= distToAxis.x && distToAxis.z <= distToAxis.y) ? sign.z : 0;
+        }
+
+        tDlt = glm::abs(vdbInfo.vDlts[0] / rayDir);
+        auto pFlt = pos / vdbInfo.vDlts[0];
+        tSide = ((glm::floor(pFlt) - pFlt + .5f) * glm::vec3{sign} + .5f) * tDlt + t;
+
+        if (depSign.x != 0) {
+            pos.x = depSign.x == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
+            if (glm::abs(rayDir.x) < Sqrt2Div2)
+                return false;
+        }
+        if (depSign.y != 0) {
+            pos.y = depSign.y == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
+            if (glm::abs(rayDir.y) < Sqrt2Div2)
+                return false;
+        }
+        if (depSign.z != 0) {
+            pos.z = depSign.z == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
+            if (glm::abs(rayDir.z) < Sqrt2Div2)
+                return false;
+        }
+
+        return depSign.x | depSign.y | depSign.z;
+    }
+
+    __dpbxvdb_hostdev__ void StepNext() {
+        using GLMIntTy = decltype(glm::ivec3::x);
+        mask.x = static_cast<GLMIntTy>((tSide.x < tSide.y) & (tSide.x <= tSide.z));
+        mask.y = static_cast<GLMIntTy>((tSide.y < tSide.z) & (tSide.y <= tSide.x));
+        mask.z = static_cast<GLMIntTy>((tSide.z < tSide.x) & (tSide.z <= tSide.y));
+
+        t = mask.x ? tSide.x : mask.y ? tSide.y : mask.z ? tSide.z : INFINITY;
+
+        tSide.x = isinf(tDlt.x) ? INFINITY : mask.x ? tSide.x + tDlt.x : tSide.x;
+        tSide.y = isinf(tDlt.y) ? INFINITY : mask.y ? tSide.y + tDlt.y : tSide.y;
+        tSide.z = isinf(tDlt.z) ? INFINITY : mask.z ? tSide.z + tDlt.z : tSide.z;
+
+        if (depSign.x != 0 && mask.x != 0) {
+            dep += 1.f;
+            mask.x = 0;
+        }
+        if (depSign.y != 0 && mask.y != 0) {
+            dep += 1.f;
+            mask.y = 0;
+        }
+        if (depSign.z != 0 && mask.z != 0) {
+            dep += 1.f;
+            mask.z = 0;
+        }
+        pos += mask * sign;
+    }
 };
 
 inline __dpbxvdb_hostdev__ glm::vec3 rayIntersectAABB(const glm::vec3 &rayPos,

@@ -2,28 +2,26 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
-void dpbxvdb::resample(const thrust::device_vector<float> &d_src, float threshold,
-                       const VDBInfo &vdbInfo, const VDBDeviceData &vdbDat) {
-    auto apronWidth = static_cast<CoordValTy>(vdbInfo.apronWidth);
+void dpbxvdb::resample(const thrust::device_vector<float> &d_src, const VDBInfo &vdbInfo,
+                       const VDBDeviceData &vdbDat) {
     auto apronWidAndDep = static_cast<CoordValTy>(vdbInfo.apronWidAndDep);
     auto voxPerBrick = vdbInfo.dims[0];
     auto minDepIdx = vdbInfo.minDepIdx;
     auto maxDepIdx = vdbInfo.maxDepIdx;
-    auto krnlFn = [src = thrust::raw_pointer_cast(d_src.data()), threshold, vdbInfo, vdbDat,
-                   apronWidth, apronWidAndDep, voxPerBrick, minDepIdx,
-                   maxDepIdx] __device__(CoordTy aIdx3, IDTy aIdx) {
+    auto krnlFn = [src = thrust::raw_pointer_cast(d_src.data()), vdbInfo, vdbDat, apronWidAndDep,
+                   voxPerBrick, minDepIdx, maxDepIdx] __device__(CoordTy aIdx3, IDTy aIdx) {
         CoordTy brickIdx3{aIdx3.x / vdbInfo.voxPerAtlasBrick, aIdx3.y / vdbInfo.voxPerAtlasBrick,
                           aIdx3.z / vdbInfo.voxPerAtlasBrick};
         auto aMin = vdbInfo.voxPerAtlasBrick * brickIdx3 + apronWidAndDep;
         auto vIdx3 = aIdx3 - aMin; // vox idx3 in Brick Space
 
-        uint8_t depDir = 0;
+        auto depSign = glm::zero<CoordTy>();
 #pragma unroll
         for (uint8_t xyz = 0; xyz < 3; ++xyz)
             if (vIdx3[xyz] == minDepIdx)
-                depDir |= static_cast<uint8_t>(1) << (xyz << 1);
+                depSign[xyz] = 1;
             else if (vIdx3[xyz] == maxDepIdx)
-                depDir |= static_cast<uint8_t>(1) << ((xyz << 1) + 1);
+                depSign[xyz] = -1;
 
         auto nodeID = vdbDat.atlasMaps[vdbInfo.AtlastBrickIdx32ID(brickIdx3)].node;
         if (nodeID == UndefID)
@@ -33,23 +31,14 @@ void dpbxvdb::resample(const thrust::device_vector<float> &d_src, float threshol
         vIdx3 =
             glm::clamp(vMin + vIdx3, glm::zero<CoordTy>(),
                        vdbInfo.voxPerVol - static_cast<CoordValTy>(1)); // vox idx3 in Volume Space
-        if (vdbInfo.useDPBX && depDir != 0) {
-            CoordTy step{(depDir & 0b000001) != 0   ? 1
-                         : (depDir & 0b000010) != 0 ? -1
-                                                    : 0,
-                         (depDir & 0b000100) != 0   ? 1
-                         : (depDir & 0b001000) != 0 ? -1
-                                                    : 0,
-                         (depDir & 0b010000) != 0   ? 1
-                         : (depDir & 0b100000) != 0 ? -1
-                                                    : 0};
-            auto pos = vIdx3 + apronWidth * step;
+        if (vdbInfo.useDPBX && (depSign.x | depSign.y | depSign.z) != 0) {
+            auto pos = vIdx3 + apronWidAndDep * depSign;
             CoordValTy t = 0;
             while (true) {
                 auto val = src[(pos.z * vdbInfo.voxPerVol.y + pos.y) * vdbInfo.voxPerVol.x + pos.x];
-                if (val >= threshold)
+                if (val >= vdbInfo.thresh)
                     break;
-                pos += step;
+                pos += depSign;
                 ++t;
                 if (t >= voxPerBrick)
                     break;

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <format>
 #include <iostream>
 #include <string_view>
 
@@ -26,7 +27,8 @@ static RenderParam rndr;
 static RenderTarget rndrTarget = RenderTarget::Vol;
 
 static auto isSparse = true;
-static auto useDPBX = false;
+static auto useDPBX = true;
+static std::array<uint8_t, 3> log2Dims{4, 5, 5};
 
 static auto reRndr = true;
 constexpr auto ReRndrCntDownInterval = static_cast<std::chrono::milliseconds>(100);
@@ -35,7 +37,7 @@ static auto reRndrCntDownStart = std::chrono::system_clock::time_point();
 
 static kouek::FPSCamera camera;
 static auto camFarClip = 10.f;
-static auto camDist2Cntr = 0.f;
+static auto cam2CntrDist = 0.f;
 
 inline void startReRndrCntDown() {
     reRndrCntDownOn = true;
@@ -53,7 +55,6 @@ static void changeRenderParam(int width, int height) {
     rndr.proj = glm::perspectiveFov(glm::radians(60.f), (float)width, (float)height,
                                     .01f * camFarClip, camFarClip);
     rndr.bkgrndCol = glm::vec3{.3f, .3f, .3f};
-    rndr.thresh = volThresh / (float)std::numeric_limits<DpbxRawVoxTy>::max();
     rndr.dt = .25f;
 
     glGenTextures(1, &rndr.texID);
@@ -86,25 +87,37 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
     const auto movSens = .02f * camFarClip;
     const auto &[R, F, U, P] = camera.GetRFUP();
 
+    if (action != GLFW_RELEASE)
+        switch (key) {
+        case GLFW_KEY_UP:
+        case GLFW_KEY_DOWN:
+        case GLFW_KEY_LEFT:
+        case GLFW_KEY_RIGHT:
+        case GLFW_KEY_Q:
+        case GLFW_KEY_E:
+            cam2CntrDist = glm::distance(camera.GetPos(), .5f * glm::vec3{volDim});
+            break;
+        }
+
     switch (key) {
     case GLFW_KEY_ESCAPE:
         glfwSetWindowShouldClose(window, GLFW_TRUE);
         break;
     case GLFW_KEY_UP:
         if (action != GLFW_RELEASE)
-            camera.Revolve(camDist2Cntr, 0.f, +rotSens);
+            camera.Revolve(cam2CntrDist, 0.f, +rotSens);
         break;
     case GLFW_KEY_DOWN:
         if (action != GLFW_RELEASE)
-            camera.Revolve(camDist2Cntr, 0.f, -rotSens);
+            camera.Revolve(cam2CntrDist, 0.f, -rotSens);
         break;
     case GLFW_KEY_LEFT:
         if (action != GLFW_RELEASE)
-            camera.Revolve(camDist2Cntr, +rotSens, 0.f);
+            camera.Revolve(cam2CntrDist, +rotSens, 0.f);
         break;
     case GLFW_KEY_RIGHT:
         if (action != GLFW_RELEASE)
-            camera.Revolve(camDist2Cntr, -rotSens, 0.f);
+            camera.Revolve(cam2CntrDist, -rotSens, 0.f);
         break;
     case GLFW_KEY_Q:
         if (action != GLFW_RELEASE)
@@ -133,15 +146,14 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
 
 static void loadVol() {
     if (isSparse)
-        volume.LoadAsSparse(volPath, volDim, volThresh, useDPBX);
+        volume.LoadAsSparse(volPath, volDim, volThresh, useDPBX, log2Dims);
     else
-        volume.LoadAsDense(volPath, volDim, useDPBX);
+        volume.LoadAsDense(volPath, volDim, useDPBX, log2Dims);
     static auto first = true;
     if (first) {
         camera.LookAt({0.5f * volDim.x, 0.5f * volDim.y, 2.f * volDim.z},
                       {0.5f * volDim.x, 0.5f * volDim.y, 0.5f * volDim.z});
         camFarClip = 1.7f * std::max({volDim.x, volDim.y, volDim.z});
-        camDist2Cntr = 1.5f * volDim.z;
 
         first = false;
     }
@@ -282,6 +294,20 @@ int main(int argc, char **argv) {
                 loadVol();
                 reRndr = true;
             }
+
+            ImGui::SameLine();
+
+            ImGui::Text("<");
+            ImGui::SameLine();
+            int leafLog2Dim = log2Dims[0];
+            if (ImGui::InputInt("leaf:", &leafLog2Dim, 1))
+                if (leafLog2Dim >= 3 && leafLog2Dim <= 10) {
+                    log2Dims[0] = leafLog2Dim;
+                    loadVol();
+                    reRndr = true;
+                }
+            ImGui::SameLine();
+            ImGui::Text("5,5>");
         }
         ImGui::EndFrame();
         ImGui::Render();

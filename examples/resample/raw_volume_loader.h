@@ -2,6 +2,7 @@
 #define KOUEK_RAW_VOLUME_LOADER_H
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <numeric>
 #include <vector>
@@ -16,15 +17,16 @@ template <typename RawVoxTy> class RawVolume {
 
   public:
     const auto &GetVDB() const { return vdb; }
-    void LoadAsDense(const std::string &path, const glm::uvec3 &dim, bool useDPBX) {
+    void LoadAsDense(const std::string &path, const glm::uvec3 &dim, bool useDPBX,
+                     const std::array<uint8_t, 3> &log2Dims = {4, 4, 5}) {
         auto src = loadSrc(path, dim);
-        vdb.Configure({4, 4, 5}, 1, useDPBX);
+        vdb.Configure(log2Dims, 1, useDPBX);
         vdb.RebuildAsDense(src, dim);
     }
     void LoadAsSparse(const std::string &path, const glm::uvec3 &dim, const RawVoxTy &threshold,
-                      bool useDPBX) {
+                      bool useDPBX, const std::array<uint8_t, 3> &log2Dims = {4, 4, 5}) {
         auto src = loadSrc(path, dim);
-        vdb.Configure({4, 4, 5}, 1, useDPBX);
+        vdb.Configure(log2Dims, 1, useDPBX);
         vdb.RebuildAsSparse(src, dim, rawVoxTy2Float(threshold));
     }
 

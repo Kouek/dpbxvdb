@@ -18,13 +18,12 @@ struct RenderParam {
     glm::uvec2 res;
     glm::mat4 proj;
     glm::vec3 bkgrndCol;
-    float thresh;
     float dt;
 };
 
-enum class RenderTarget { Vol, BrickL0, BrickL1, BrickL2, Depth, End };
-
-constexpr std::array RenderTargetNames{"Volume", "Brick L0", "Brick L1", "Brick L2", "Depth"};
+enum class RenderTarget { Vol, BrickL0, BrickL1, BrickL2, Depth, SkipTimeDlt, End };
+constexpr std::array RenderTargetNames{"Volume",   "Brick L0", "Brick L1",
+                                       "Brick L2", "Depth",    "Skip Time Delta"};
 
 void release();
 void setRenderParam(const RenderParam &param);
