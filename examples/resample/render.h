@@ -14,21 +14,24 @@
 using DpbxRawVoxTy = uint8_t;
 
 struct RenderParam {
+    bool usePhongShading;
     GLuint texID;
     glm::uvec2 res;
     glm::mat4 proj;
     glm::vec3 bkgrndCol;
     float dt;
+    float ka, kd, ks, shininess;
 };
 
-enum class RenderTarget { Vol, BrickL0, BrickL1, BrickL2, Depth, SkipTimeDlt, End };
+enum class RenderTarget { Vol, BrickL0, BrickL1, BrickL2, Depth, SkipTimeDiff, End };
 constexpr std::array RenderTargetNames{"Volume",   "Brick L0", "Brick L1",
-                                       "Brick L2", "Depth",    "Skip Time Delta"};
+                                       "Brick L2", "Depth",    "Skip Time Diff"};
 
 void release();
 void setRenderParam(const RenderParam &param);
 void setDPBXParam(const dpbxvdb::VDBInfo &vdbInfo, const dpbxvdb::VDBDeviceData &vdbDat);
 void setTF(const std::vector<float> &flatTF);
-void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget);
+void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget,
+            float &costInMs);
 
 #endif // !KOUEK_MAIN_H

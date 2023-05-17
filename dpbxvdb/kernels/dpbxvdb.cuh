@@ -177,9 +177,9 @@ struct HDDA3D {
 };
 
 struct DPBXDDA2D {
-    float t;
+    float t, tStart;
     float dep;
-    glm::ivec3 depSign;
+    float tDlt2Dep;
     glm::ivec3 sign;
     glm::ivec3 mask;
     glm::vec3 tSide;
@@ -201,8 +201,9 @@ struct DPBXDDA2D {
                 rayDir.z > 0.f   ? 1
                 : rayDir.z < 0.f ? -1
                                  : 0};
-        this->t = t;
+        this->t = tStart = t;
 
+        glm::ivec3 depSign;
         {
             float max = vdbInfo.dims[0] - 1;
             glm::vec3 distToAxis{sign.x == 0  ? INFINITY
@@ -225,17 +226,26 @@ struct DPBXDDA2D {
 
         if (depSign.x != 0) {
             pos.x = depSign.x == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
-            if (glm::abs(rayDir.x) < Sqrt2Div2)
+            sign.x = 0;
+            tSide.x = INFINITY;
+            tDlt2Dep = glm::abs(rayDir.x); 
+            if (tDlt2Dep < Sqrt2Div2)
                 return false;
         }
         if (depSign.y != 0) {
             pos.y = depSign.y == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
-            if (glm::abs(rayDir.y) < Sqrt2Div2)
+            sign.y = 0;
+            tSide.y = INFINITY;
+            tDlt2Dep = glm::abs(rayDir.y);
+            if (tDlt2Dep < Sqrt2Div2)
                 return false;
         }
         if (depSign.z != 0) {
             pos.z = depSign.z == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
-            if (glm::abs(rayDir.z) < Sqrt2Div2)
+            sign.z = 0;
+            tSide.z = INFINITY;
+            tDlt2Dep = glm::abs(rayDir.z);
+            if (tDlt2Dep < Sqrt2Div2)
                 return false;
         }
 
@@ -249,23 +259,12 @@ struct DPBXDDA2D {
         mask.z = static_cast<GLMIntTy>((tSide.z < tSide.x) & (tSide.z <= tSide.y));
 
         t = mask.x ? tSide.x : mask.y ? tSide.y : mask.z ? tSide.z : INFINITY;
+        dep = tDlt2Dep * (t - tStart);
 
         tSide.x = isinf(tDlt.x) ? INFINITY : mask.x ? tSide.x + tDlt.x : tSide.x;
         tSide.y = isinf(tDlt.y) ? INFINITY : mask.y ? tSide.y + tDlt.y : tSide.y;
         tSide.z = isinf(tDlt.z) ? INFINITY : mask.z ? tSide.z + tDlt.z : tSide.z;
 
-        if (depSign.x != 0 && mask.x != 0) {
-            dep += 1.f;
-            mask.x = 0;
-        }
-        if (depSign.y != 0 && mask.y != 0) {
-            dep += 1.f;
-            mask.y = 0;
-        }
-        if (depSign.z != 0 && mask.z != 0) {
-            dep += 1.f;
-            mask.z = 0;
-        }
         pos += mask * sign;
     }
 };

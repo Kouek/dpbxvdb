@@ -63,6 +63,9 @@ class Tree {
     void Configure(const std::array<uint8_t, MaxLevNum> &log2Dims, uint8_t apronWidth = 1,
                    bool useDPBX = false,
                    DownsamplePolicy downsamplePolicy = DownsamplePolicy::Max) {
+        if (useDPBX)
+            ++apronWidth; // to avoid tri-linear filter with depth vox, add 1 layer of arpon
+
         this->downsamplePolicy = downsamplePolicy;
 
         for (uint8_t lev = 0; lev < MaxLevNum; ++lev) {
@@ -367,7 +370,9 @@ class Tree {
 
         cudaTextureDesc texDesc;
         memset(&texDesc, 0, sizeof(texDesc));
-        texDesc.addressMode[0] = cudaAddressModeClamp;
+        texDesc.addressMode[0] = cudaAddressModeBorder;
+        texDesc.borderColor[0] = texDesc.borderColor[1] = texDesc.borderColor[2] =
+            texDesc.borderColor[3] = 0.f;
         texDesc.filterMode = cudaFilterModeLinear;
         texDesc.readMode = cudaReadModeElementType;
         texDesc.normalizedCoords = 0;

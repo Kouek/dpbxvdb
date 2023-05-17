@@ -29,6 +29,7 @@ static RenderTarget rndrTarget = RenderTarget::Vol;
 static auto isSparse = true;
 static auto useDPBX = true;
 static std::array<uint8_t, 3> log2Dims{4, 5, 5};
+static float costInMs = 0.f;
 
 static auto reRndr = true;
 constexpr auto ReRndrCntDownInterval = static_cast<std::chrono::milliseconds>(100);
@@ -45,9 +46,6 @@ inline void startReRndrCntDown() {
 }
 
 static void changeRenderParam(int width, int height) {
-    auto sz = std::min(width, height);
-    width = height = sz;
-
     if (rndr.texID != 0)
         glDeleteTextures(1, &rndr.texID);
     rndr.res.x = width;
@@ -175,6 +173,10 @@ int main(int argc, char **argv) {
     volDim.z = std::atoi(argv[4]);
     volThresh = static_cast<DpbxRawVoxTy>(std::atoi(argv[5]));
 
+    rndr.usePhongShading = false;
+    rndr.ka = rndr.kd = rndr.ks = .5f;
+    rndr.shininess = 64.f;
+
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
@@ -256,7 +258,7 @@ int main(int argc, char **argv) {
 
         if (reRndr) {
             const auto &[R, F, U, P] = camera.GetRFUP();
-            render(P, glm::mat3{R, U, -F}, rndrTarget);
+            render(P, glm::mat3{R, U, -F}, rndrTarget, costInMs);
             reRndr = false;
         }
 
@@ -264,10 +266,14 @@ int main(int argc, char **argv) {
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         {
+            ImGui::Text("Cost %f ms, with %f fps", costInMs, 1000.f / costInMs);
+            ImGui::NewLine();
+
             if (tfWidget()) {
                 changeTF();
                 startReRndrCntDown();
             }
+            ImGui::NewLine();
 
             static auto lastSelected = static_cast<uint8_t>(rndrTarget);
             for (uint8_t i = 0; i < static_cast<uint8_t>(RenderTarget::End); ++i) {
@@ -280,38 +286,67 @@ int main(int argc, char **argv) {
                         reRndr = true;
                     }
             }
+            ImGui::NewLine();
+
+            {
+                bool reSetRndrParam = false;
+                if (ImGui::RadioButton("Use Phong Shading", rndr.usePhongShading)) {
+                    rndr.usePhongShading = !rndr.usePhongShading;
+                    reSetRndrParam = true;
+                }
+                ImGui::SameLine();
+                ImGui::PushItemWidth(100.f);
+                if (ImGui::InputFloat("ka", &rndr.ka, .05f, .1f))
+                    reSetRndrParam = true;
+                ImGui::SameLine();
+                if (ImGui::InputFloat("kd", &rndr.kd, .05f, .1f))
+                    reSetRndrParam = true;
+                ImGui::SameLine();
+                if (ImGui::InputFloat("ks", &rndr.ks, .05f, .1f))
+                    reSetRndrParam = true;
+                ImGui::SameLine();
+                if (ImGui::InputFloat("shininess", &rndr.shininess, 0.f, 0.f))
+                    reSetRndrParam = true;
+                if (reSetRndrParam) {
+                    int w, h;
+                    glfwGetFramebufferSize(window, &w, &h);
+                    changeRenderParam(w, h);
+                    reRndr = true;
+                }
+                ImGui::PopItemWidth();
+            }
+            ImGui::NewLine();
 
             if (ImGui::RadioButton("Is Sparse", isSparse)) {
                 isSparse = !isSparse;
                 loadVol();
                 reRndr = true;
             }
-
             ImGui::SameLine();
-
             if (ImGui::RadioButton("Use DPBX", useDPBX)) {
                 useDPBX = !useDPBX;
                 loadVol();
                 reRndr = true;
             }
 
+            ImGui::Text("log2 Dims: <");
             ImGui::SameLine();
-
-            ImGui::Text("<");
-            ImGui::SameLine();
+            ImGui::PushItemWidth(100.f);
             int leafLog2Dim = log2Dims[0];
-            if (ImGui::InputInt("leaf:", &leafLog2Dim, 1))
+            if (ImGui::InputInt("###", &leafLog2Dim, 1))
                 if (leafLog2Dim >= 3 && leafLog2Dim <= 10) {
                     log2Dims[0] = leafLog2Dim;
                     loadVol();
                     reRndr = true;
                 }
+            ImGui::PopItemWidth();
             ImGui::SameLine();
             ImGui::Text("5,5>");
         }
         ImGui::EndFrame();
         ImGui::Render();
 
+        glViewport(0, 0, rndr.res.x, rndr.res.y);
         glClear(GL_COLOR_BUFFER_BIT);
 
         glBindTexture(GL_TEXTURE_2D, rndr.texID);
