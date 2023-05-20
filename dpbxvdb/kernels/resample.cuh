@@ -13,6 +13,7 @@ namespace dpbxvdb {
 
 void resample(const thrust::device_vector<float> &d_src, const VDBInfo &vdbInfo,
               const VDBDeviceData &vdbDat);
+void resampleDepth(const VDBInfo &vdbInfo, const VDBDeviceData &vdbDat);
 
 }
 

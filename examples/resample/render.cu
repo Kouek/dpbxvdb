@@ -6,12 +6,9 @@
 #include <device_launch_parameters.h>
 #include <thrust/tuple.h>
 
-#include <cg/math.h>
-
 struct CURenderParam {
     bool usePhongShading;
     glm::uvec2 res;
-    glm::mat4 unProj;
     glm::vec3 bkgrndCol;
     float thresh;
     float dt;
@@ -42,7 +39,6 @@ void release() {
 
 void setRenderParam(const RenderParam &param) {
     rndr.res = param.res;
-    rndr.unProj = kouek::Math::InverseProjective(param.proj);
     rndr.bkgrndCol = param.bkgrndCol;
     rndr.usePhongShading = param.usePhongShading;
     rndr.dt = param.dt;
@@ -106,13 +102,14 @@ inline __device__ glm::vec4 transferFunc(float v) {
     return glm::vec4{rgba.x, rgba.y, rgba.z, rgba.w};
 }
 
-inline __device__ glm::vec3 pix2RayDir(const glm::uvec2 &pix, const glm::mat3 &camRot) {
+inline __device__ glm::vec3 pix2RayDir(const glm::uvec2 &pix, const glm::mat4 &unProj,
+                                       const glm::mat4 &tr) {
     glm::vec4 tmp{float((pix.x << 1) + 1) / dc_rndr.res.x - 1.f,
                   float((pix.y << 1) + 1) / dc_rndr.res.y - 1.f, 1.f, 1.f};
-    tmp = dc_rndr.unProj * tmp;
+    tmp = unProj * tmp;
     glm::vec3 rayDir = tmp;
 
-    rayDir = camRot * glm::normalize(rayDir);
+    rayDir = glm::mat3{tr} * glm::normalize(rayDir);
     return rayDir;
 }
 
@@ -177,28 +174,32 @@ inline __device__ bool trySkipBirck(float &t, const glm::vec3 &rayPos, const glm
     if (!dpbxdda.Init(rayPos, rayDir, t, posInBrick, dc_vdbInfo))
         return false;
 
+    auto lastDep = tex3D<float>(dc_vdbDat.atlasDepTex, aMin.x + dpbxdda.idx3InBlock.x,
+                                aMin.y + dpbxdda.idx3InBlock.y, aMin.z + dpbxdda.idx3InBlock.z);
     while (true) {
-        auto dep = tex3D<float>(dc_vdbDat.atlasDepTex, aMin.x + dpbxdda.pos.x,
-                                aMin.y + dpbxdda.pos.y, aMin.z + dpbxdda.pos.z);
-        if (dep <= dpbxdda.dep)
+        dpbxdda.StepNext();
+        auto dep = tex3D<float>(dc_vdbDat.atlasDepTex, aMin.x + dpbxdda.idx3InBlock.x,
+                                aMin.y + dpbxdda.idx3InBlock.y, aMin.z + dpbxdda.idx3InBlock.z);
+        if (glm::min(lastDep, dep) <= dpbxdda.dep)
             return false;
         if (dpbxdda.t > tMax)
             return true;
 
         t = dpbxdda.t;
-        dpbxdda.StepNext();
+        lastDep = dep;
     }
     return false;
 }
 
-__global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot) {
+__global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm::mat4 tr) {
     using namespace dpbxvdb;
 
     glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
     if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
         return;
 
-    auto rayDir = pix2RayDir(pix, camRot);
+    glm::vec3 camPos = tr[3];
+    auto rayDir = pix2RayDir(pix, unProj, tr);
     auto LR = -rayDir;
     const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
@@ -296,14 +297,15 @@ __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm:
     surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
 }
 
-__global__ void renderDPBXKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot) {
+__global__ void renderDPBXKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm::mat4 tr) {
     using namespace dpbxvdb;
 
     glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
     if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
         return;
 
-    auto rayDir = pix2RayDir(pix, camRot);
+    glm::vec3 camPos = tr[3];
+    auto rayDir = pix2RayDir(pix, unProj, tr);
     auto LR = -rayDir;
     const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
@@ -407,14 +409,15 @@ __global__ void renderDPBXKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, 
     surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
 }
 
-__global__ void renderDepthKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot) {
+__global__ void renderDepthKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm::mat4 tr) {
     using namespace dpbxvdb;
 
     glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
     if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
         return;
 
-    auto rayDir = pix2RayDir(pix, camRot);
+    glm::vec3 camPos = tr[3];
+    auto rayDir = pix2RayDir(pix, unProj, tr);
     const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
     if (!dc_vdbInfo.useDPBX || tStart.z < 0.f) {
@@ -462,8 +465,9 @@ __global__ void renderDepthKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos,
 
                 DPBXDDA2D dpbxdda;
                 dpbxdda.Init(camPos, rayDir, hdda.t.x, posInBrick, dc_vdbInfo);
-                auto dep = tex3D<float>(dc_vdbDat.atlasDepTex, aMin.x + dpbxdda.pos.x,
-                                        aMin.y + dpbxdda.pos.y, aMin.z + dpbxdda.pos.z);
+                auto dep =
+                    tex3D<float>(dc_vdbDat.atlasDepTex, aMin.x + dpbxdda.idx3InBlock.x,
+                                 aMin.y + dpbxdda.idx3InBlock.y, aMin.z + dpbxdda.idx3InBlock.z);
 
                 rgb = glm::vec3{dep / voxPerBrick};
                 alpha = 1.f;
@@ -492,15 +496,16 @@ __global__ void renderDepthKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos,
     surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
 }
 
-__global__ void renderSkipTimeDiffKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos,
-                                         glm::mat3 camRot) {
+__global__ void renderSkipTimeDiffKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj,
+                                         glm::mat4 tr) {
     using namespace dpbxvdb;
 
     glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
     if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
         return;
 
-    auto rayDir = pix2RayDir(pix, camRot);
+    glm::vec3 camPos = tr[3];
+    auto rayDir = pix2RayDir(pix, unProj, tr);
     const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
     if (!dc_vdbInfo.useDPBX || tStart.z < 0.f) {
@@ -617,7 +622,7 @@ __global__ void renderSkipTimeDiffKernel(cudaSurfaceObject_t outSurf, glm::vec3 
     surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
 }
 
-__global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos, glm::mat3 camRot,
+__global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm::mat4 tr,
                                   uint8_t drawLev) {
     using namespace dpbxvdb;
 
@@ -625,7 +630,8 @@ __global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos,
     if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
         return;
 
-    auto rayDir = pix2RayDir(pix, camRot);
+    glm::vec3 camPos = tr[3];
+    auto rayDir = pix2RayDir(pix, unProj, tr);
     const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
     if (tStart.z < 0.f) {
@@ -698,7 +704,7 @@ __global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::vec3 camPos,
     surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
 }
 
-void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget,
+void render(const glm::mat4 &unProj, const glm::mat4 &tr, RenderTarget rndrTarget,
             float &costInMs) {
     cudaGraphicsMapResources(1, &rndrTexRes);
 
@@ -718,20 +724,20 @@ void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrT
     switch (rndrTarget) {
     case RenderTarget::Vol:
         if (vdbInfo.useDPBX)
-            renderDPBXKernel<<<grid, block>>>(outSurf, camPos, camRot);
+            renderDPBXKernel<<<grid, block>>>(outSurf, unProj, tr);
         else
-            renderKernel<<<grid, block>>>(outSurf, camPos, camRot);
+            renderKernel<<<grid, block>>>(outSurf, unProj, tr);
         break;
     case RenderTarget::Depth:
-        renderDepthKernel<<<grid, block>>>(outSurf, camPos, camRot);
+        renderDepthKernel<<<grid, block>>>(outSurf, unProj, tr);
         break;
     case RenderTarget::SkipTimeDiff:
-        renderSkipTimeDiffKernel<<<grid, block>>>(outSurf, camPos, camRot);
+        renderSkipTimeDiffKernel<<<grid, block>>>(outSurf, unProj, tr);
         break;
     case RenderTarget::BrickL0:
     case RenderTarget::BrickL1:
     case RenderTarget::BrickL2:
-        renderBrickKernel<<<grid, block>>>(outSurf, camPos, camRot,
+        renderBrickKernel<<<grid, block>>>(outSurf, unProj, tr,
                                            static_cast<uint8_t>(rndrTarget) -
                                                static_cast<uint8_t>(RenderTarget::BrickL0));
         break;

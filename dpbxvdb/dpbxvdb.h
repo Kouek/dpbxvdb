@@ -410,6 +410,7 @@ class Tree {
         setupAtlasAccess();
         uploadDeviceData();
         resample(d_src, info, devDat);
+        resampleDepth(info, devDat);
     }
 };
 

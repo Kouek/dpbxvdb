@@ -17,7 +17,6 @@ struct RenderParam {
     bool usePhongShading;
     GLuint texID;
     glm::uvec2 res;
-    glm::mat4 proj;
     glm::vec3 bkgrndCol;
     float dt;
     float ka, kd, ks, shininess;
@@ -31,7 +30,6 @@ void release();
 void setRenderParam(const RenderParam &param);
 void setDPBXParam(const dpbxvdb::VDBInfo &vdbInfo, const dpbxvdb::VDBDeviceData &vdbDat);
 void setTF(const std::vector<float> &flatTF);
-void render(const glm::vec3 &camPos, const glm::mat3 &camRot, RenderTarget rndrTarget,
-            float &costInMs);
+void render(const glm::mat4 &unProj, const glm::mat4 &tr, RenderTarget rndrTarget, float &costInMs);
 
 #endif // !KOUEK_MAIN_H

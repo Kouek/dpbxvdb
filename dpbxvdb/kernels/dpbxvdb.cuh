@@ -182,16 +182,16 @@ struct DPBXDDA2D {
     float tDlt2Dep;
     glm::ivec3 sign;
     glm::ivec3 mask;
+    glm::ivec3 idx3InBlock;
     glm::vec3 tSide;
     glm::vec3 tDlt;
-    glm::vec3 pos;
 
     __dpbxvdb_hostdev__ bool Init(const glm::vec3 &rayPos, const glm::vec3 &rayDir, float t,
                                   const glm::vec3 &posInBrick, const VDBInfo &vdbInfo) {
         constexpr auto Sqrt2Div2 = 0.70710678f;
 
         dep = 0.f;
-        pos = posInBrick;
+        idx3InBlock = glm::floor(posInBrick);
         sign = {rayDir.x > 0.f   ? 1
                 : rayDir.x < 0.f ? -1
                                  : 0,
@@ -207,46 +207,46 @@ struct DPBXDDA2D {
         {
             float max = vdbInfo.dims[0] - 1;
             glm::vec3 distToAxis{sign.x == 0  ? INFINITY
-                                 : sign.x > 0 ? pos.x
-                                              : max - pos.x,
+                                 : sign.x > 0 ? posInBrick.x
+                                              : max - posInBrick.x,
                                  sign.y == 0  ? INFINITY
-                                 : sign.y > 0 ? pos.y
-                                              : max - pos.y,
+                                 : sign.y > 0 ? posInBrick.y
+                                              : max - posInBrick.y,
                                  sign.z == 0  ? INFINITY
-                                 : sign.z > 0 ? pos.z
-                                              : max - pos.z};
+                                 : sign.z > 0 ? posInBrick.z
+                                              : max - posInBrick.z};
             depSign.x = (distToAxis.x <= distToAxis.y && distToAxis.x <= distToAxis.z) ? sign.x : 0;
             depSign.y = (distToAxis.y <= distToAxis.z && distToAxis.y <= distToAxis.x) ? sign.y : 0;
             depSign.z = (distToAxis.z <= distToAxis.x && distToAxis.z <= distToAxis.y) ? sign.z : 0;
         }
 
         tDlt = glm::abs(vdbInfo.vDlts[0] / rayDir);
-        auto pFlt = pos / vdbInfo.vDlts[0];
+        auto pFlt = posInBrick / vdbInfo.vDlts[0];
         tSide = ((glm::floor(pFlt) - pFlt + .5f) * glm::vec3{sign} + .5f) * tDlt + t;
 
         if (depSign.x != 0) {
-            pos.x = depSign.x == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
+            idx3InBlock.x = depSign.x == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
             sign.x = 0;
             tSide.x = INFINITY;
-            tDlt2Dep = glm::abs(rayDir.x); 
-            if (tDlt2Dep < Sqrt2Div2)
-                return false;
+            tDlt2Dep = glm::abs(rayDir.x);
+            //if (tDlt2Dep < Sqrt2Div2)
+            //    return false;
         }
         if (depSign.y != 0) {
-            pos.y = depSign.y == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
+            idx3InBlock.y = depSign.y == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
             sign.y = 0;
             tSide.y = INFINITY;
             tDlt2Dep = glm::abs(rayDir.y);
-            if (tDlt2Dep < Sqrt2Div2)
-                return false;
+            //if (tDlt2Dep < Sqrt2Div2)
+            //    return false;
         }
         if (depSign.z != 0) {
-            pos.z = depSign.z == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
+            idx3InBlock.z = depSign.z == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
             sign.z = 0;
             tSide.z = INFINITY;
             tDlt2Dep = glm::abs(rayDir.z);
-            if (tDlt2Dep < Sqrt2Div2)
-                return false;
+            //if (tDlt2Dep < Sqrt2Div2)
+            //    return false;
         }
 
         return depSign.x | depSign.y | depSign.z;
@@ -265,7 +265,7 @@ struct DPBXDDA2D {
         tSide.y = isinf(tDlt.y) ? INFINITY : mask.y ? tSide.y + tDlt.y : tSide.y;
         tSide.z = isinf(tDlt.z) ? INFINITY : mask.z ? tSide.z + tDlt.z : tSide.z;
 
-        pos += mask * sign;
+        idx3InBlock += mask * sign;
     }
 };
 
@@ -273,7 +273,7 @@ inline __dpbxvdb_hostdev__ glm::vec3 rayIntersectAABB(const glm::vec3 &rayPos,
                                                       const glm::vec3 &rayDir,
                                                       const glm::vec3 &AABBMin,
                                                       const glm::vec3 &AABBMax) {
-    register float ht[8];
+    float ht[8];
     ht[0] = (AABBMin.x - rayPos.x) / rayDir.x;
     ht[1] = (AABBMax.x - rayPos.x) / rayDir.x;
     ht[2] = (AABBMin.y - rayPos.y) / rayDir.y;
