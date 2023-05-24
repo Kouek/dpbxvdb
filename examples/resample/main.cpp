@@ -24,10 +24,12 @@ static RawVolume<DpbxRawVoxTy> volume;
 static std::string volPath;
 static glm::uvec3 volDim;
 static DpbxRawVoxTy volThresh;
+static AxisTransform volAxisTr{0, 1, 2};
 
 static RenderParam rndr;
 static RenderTarget rndrTarget = RenderTarget::Vol;
 
+static auto drawUI = true;
 static auto isSparse = true;
 static auto useDPBX = true;
 static std::array<uint8_t, 3> log2Dims{4, 5, 5};
@@ -98,6 +100,9 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
         case GLFW_KEY_E:
             cam2CntrDist = glm::distance(camera.GetPos(), .5f * voxSpacing * glm::vec3{volDim});
             break;
+        case GLFW_KEY_U:
+            drawUI = !drawUI;
+            break;
         }
 
     switch (key) {
@@ -147,9 +152,9 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
 
 static void loadVol() {
     if (isSparse)
-        volume.LoadAsSparse(volPath, volDim, volThresh, useDPBX, log2Dims);
+        volume.LoadAsSparse(volPath, volDim, volThresh, useDPBX, log2Dims, volAxisTr);
     else
-        volume.LoadAsDense(volPath, volDim, useDPBX, log2Dims);
+        volume.LoadAsDense(volPath, volDim, useDPBX, log2Dims, volAxisTr);
     static auto first = true;
     if (first) {
         camera.LookAt(glm::vec3{.5f, .5f, 1.2f} * voxSpacing * glm::vec3{volDim},
@@ -175,8 +180,14 @@ int main(int argc, char **argv) {
                                      "Path of TXT file storing transfer function");
     parser.set_optional<float>("sx", "spacing-x", -1.f, "Spacing of voxel on X-axis");
     parser.set_optional<float>("sy", "spacing-y", -1.f, "Spacing of voxel on Y-axis");
-    parser.set_optional<float>("sz", "spacing-z", -1.f, "Spacing of voxel on X-axis");
-    parser.run_and_exit_if_error();
+    parser.set_optional<float>("sz", "spacing-z", -1.f, "Spacing of voxel on Z-axis");
+    {
+        std::string trDesc(", 0 for X, 1 for Y and 2 for Z, while 3 for -X, 4 for -Y and 5 for -Z");
+        parser.set_optional<uint8_t>("tx", "tr-x", 0, "Transform of X-axis" + trDesc);
+        parser.set_optional<uint8_t>("ty", "tr-y", 1, "Transform of Y-axis" + trDesc);
+        parser.set_optional<uint8_t>("tz", "tr-z", 2, "Transform of Z-axis" + trDesc);
+        parser.run_and_exit_if_error();
+    }
 
     volPath = parser.get<std::string>("vol");
     volDim.x = parser.get<glm::uint>("dx");
@@ -191,6 +202,19 @@ int main(int argc, char **argv) {
     if (auto sz = parser.get<float>("sz"); sz != -1.f)
         voxSpacing.z = sz;
     invVoxSpacing = 1.f / voxSpacing;
+
+    volAxisTr.x = parser.get<uint8_t>("tx");
+    volAxisTr.y = parser.get<uint8_t>("ty");
+    volAxisTr.z = parser.get<uint8_t>("tz");
+    volAxisTr = [&]() -> AxisTransform {
+        std::array<uint8_t, 3> hasVal{0};
+        for (uint8_t xyz = 0; xyz < 3; ++xyz)
+            ++hasVal[volAxisTr[xyz] % 3];
+        for (auto v : hasVal)
+            if (v == 0 || v >= 2)
+                return {0, 1, 2};
+        return volAxisTr;
+    }();
 
     rndr.usePhongShading = false;
     rndr.ka = rndr.kd = rndr.ks = .5f;
@@ -283,96 +307,97 @@ int main(int argc, char **argv) {
             render(camUnProj, tr, rndrTarget, costInMs);
             reRndr = false;
         }
-
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-        ImGui::Begin("Efficiency and Camera Setting");
-        {
-            ImGui::Text("Cost %f ms, with %f fps", costInMs, 1000.f / costInMs);
-            if (ImGui::DragFloat3("Voxel Spacing", &voxSpacing[0], .1f, dpbxvdb::Epsilon,
-                                  std::numeric_limits<float>::infinity())) {
-                invVoxSpacing = 1.f / voxSpacing;
-                reRndr = true;
-            }
-        }
-        ImGui::End();
-        ImGui::Begin("Rendering Setting");
-        {
-            if (tfWidget()) {
-                changeTF();
-                startReRndrCntDown();
-            }
-            static auto lastSelected = static_cast<uint8_t>(rndrTarget);
-            for (uint8_t i = 0; i < static_cast<uint8_t>(RenderTarget::End); ++i) {
-                if (i != 0)
-                    ImGui::SameLine();
-                if (ImGui::RadioButton(RenderTargetNames[i], lastSelected == i))
-                    if (lastSelected != i) {
-                        rndrTarget = static_cast<RenderTarget>(i);
-                        lastSelected = i;
-                        reRndr = true;
-                    }
-            }
+        if (drawUI) {
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+            ImGui::Begin("Efficiency and Camera Setting");
             {
-                bool reSetRndrParam = false;
-                if (ImGui::RadioButton("Use Phong Shading", rndr.usePhongShading)) {
-                    rndr.usePhongShading = !rndr.usePhongShading;
-                    reSetRndrParam = true;
-                }
-                ImGui::PushItemWidth(100.f);
-                if (ImGui::InputFloat("ka", &rndr.ka, .05f, .1f))
-                    reSetRndrParam = true;
-                ImGui::SameLine();
-                if (ImGui::InputFloat("kd", &rndr.kd, .05f, .1f))
-                    reSetRndrParam = true;
-                ImGui::SameLine();
-                if (ImGui::InputFloat("ks", &rndr.ks, .05f, .1f))
-                    reSetRndrParam = true;
-                ImGui::SameLine();
-                if (ImGui::InputFloat("shininess", &rndr.shininess, 0.f, 0.f))
-                    reSetRndrParam = true;
-                if (reSetRndrParam) {
-                    int w, h;
-                    glfwGetFramebufferSize(window, &w, &h);
-                    framebufferSizeCallback(window, w, h);
+                ImGui::Text("Cost %f ms, with %f fps", costInMs, 1000.f / costInMs);
+                if (ImGui::DragFloat3("Voxel Spacing", &voxSpacing[0], .1f, dpbxvdb::Epsilon,
+                                      std::numeric_limits<float>::infinity())) {
+                    invVoxSpacing = 1.f / voxSpacing;
                     reRndr = true;
                 }
-                ImGui::PopItemWidth();
             }
-        }
-        ImGui::End();
-        ImGui::Begin("Tree Setting");
-        {
-            if (ImGui::RadioButton("Is Sparse", isSparse)) {
-                isSparse = !isSparse;
-                loadVol();
-                reRndr = true;
+            ImGui::End();
+            ImGui::Begin("Rendering Setting");
+            {
+                if (tfWidget()) {
+                    changeTF();
+                    startReRndrCntDown();
+                }
+                static auto lastSelected = static_cast<uint8_t>(rndrTarget);
+                for (uint8_t i = 0; i < static_cast<uint8_t>(RenderTarget::End); ++i) {
+                    if (i != 0)
+                        ImGui::SameLine();
+                    if (ImGui::RadioButton(RenderTargetNames[i], lastSelected == i))
+                        if (lastSelected != i) {
+                            rndrTarget = static_cast<RenderTarget>(i);
+                            lastSelected = i;
+                            reRndr = true;
+                        }
+                }
+                {
+                    bool reSetRndrParam = false;
+                    if (ImGui::RadioButton("Use Phong Shading", rndr.usePhongShading)) {
+                        rndr.usePhongShading = !rndr.usePhongShading;
+                        reSetRndrParam = true;
+                    }
+                    ImGui::PushItemWidth(100.f);
+                    if (ImGui::InputFloat("ka", &rndr.ka, .05f, .1f))
+                        reSetRndrParam = true;
+                    ImGui::SameLine();
+                    if (ImGui::InputFloat("kd", &rndr.kd, .05f, .1f))
+                        reSetRndrParam = true;
+                    ImGui::SameLine();
+                    if (ImGui::InputFloat("ks", &rndr.ks, .05f, .1f))
+                        reSetRndrParam = true;
+                    ImGui::SameLine();
+                    if (ImGui::InputFloat("shininess", &rndr.shininess, 0.f, 0.f))
+                        reSetRndrParam = true;
+                    if (reSetRndrParam) {
+                        int w, h;
+                        glfwGetFramebufferSize(window, &w, &h);
+                        framebufferSizeCallback(window, w, h);
+                        reRndr = true;
+                    }
+                    ImGui::PopItemWidth();
+                }
             }
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Use DPBX", useDPBX)) {
-                useDPBX = !useDPBX;
-                loadVol();
-                reRndr = true;
-            }
-
-            ImGui::Text("log2 Dims: <");
-            ImGui::SameLine();
-            ImGui::PushItemWidth(100.f);
-            int leafLog2Dim = log2Dims[0];
-            if (ImGui::InputInt("###", &leafLog2Dim, 1))
-                if (leafLog2Dim >= 3 && leafLog2Dim <= 10) {
-                    log2Dims[0] = leafLog2Dim;
+            ImGui::End();
+            ImGui::Begin("Tree Setting");
+            {
+                if (ImGui::RadioButton("Is Sparse", isSparse)) {
+                    isSparse = !isSparse;
                     loadVol();
                     reRndr = true;
                 }
-            ImGui::PopItemWidth();
-            ImGui::SameLine();
-            ImGui::Text("5,5>");
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Use DPBX", useDPBX)) {
+                    useDPBX = !useDPBX;
+                    loadVol();
+                    reRndr = true;
+                }
+
+                ImGui::Text("log2 Dims: <");
+                ImGui::SameLine();
+                ImGui::PushItemWidth(100.f);
+                int leafLog2Dim = log2Dims[0];
+                if (ImGui::InputInt("###", &leafLog2Dim, 1))
+                    if (leafLog2Dim >= 3 && leafLog2Dim <= 10) {
+                        log2Dims[0] = leafLog2Dim;
+                        loadVol();
+                        reRndr = true;
+                    }
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                ImGui::Text("5,5>");
+            }
+            ImGui::End();
+            ImGui::EndFrame();
+            ImGui::Render();
         }
-        ImGui::End();
-        ImGui::EndFrame();
-        ImGui::Render();
 
         glViewport(0, 0, rndr.res.x, rndr.res.y);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -383,7 +408,8 @@ int main(int argc, char **argv) {
         glBindVertexArray(0);
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (drawUI)
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwPollEvents();
         glfwSwapBuffers(window);

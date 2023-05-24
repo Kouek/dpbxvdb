@@ -17,9 +17,15 @@ std::vector<float> dpbxvdb::downsample(const thrust::device_vector<float> &d_src
         auto vMin = voxPerBrick * idx3;
         auto vMax = voxPerBrick * (idx3 + glm::one<decltype(idx3)>());
         auto v = 0.f;
-        for (auto z = vMin.z; z < vMax.z; ++z)
-            for (auto y = vMin.y; y < vMax.y; ++y)
+        for (auto z = vMin.z; z < vMax.z; ++z) {
+            if (z >= voxPerVol.z)
+                break;
+            for (auto y = vMin.y; y < vMax.y; ++y) {
+                if (y >= voxPerVol.y)
+                    break;
                 for (auto x = vMin.x; x < vMax.x; ++x) {
+                    if (x >= voxPerVol.x)
+                        break;
                     auto vIdx = (z * voxPerVol.y + y) * voxPerVol.x + x;
                     switch (policy) {
                     case DownsamplePolicy::Avg:
@@ -30,6 +36,8 @@ std::vector<float> dpbxvdb::downsample(const thrust::device_vector<float> &d_src
                         break;
                     }
                 }
+            }
+        }
         if (policy == DownsamplePolicy::Avg)
             v /= (float)voxPerBrick * voxPerBrick * voxPerBrick;
         dst[idx] = v;
