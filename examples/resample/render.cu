@@ -185,7 +185,7 @@ inline __device__ bool trySkipBirck(float &t, const glm::vec3 &rayPos, const glm
         if (dpbxdda.t > tMax)
             return true;
 
-        t = dpbxdda.t;
+        t = glm::max(t, dpbxdda.t);
         lastDep = dep;
     }
     return false;

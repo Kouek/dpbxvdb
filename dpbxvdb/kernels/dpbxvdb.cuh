@@ -205,7 +205,7 @@ struct DPBXDDA2D {
 
         glm::ivec3 depSign;
         {
-            float max = vdbInfo.dims[0] - 1;
+            float max = vdbInfo.dims[0];
             glm::vec3 distToAxis{sign.x == 0  ? INFINITY
                                  : sign.x > 0 ? posInBrick.x
                                               : max - posInBrick.x,
@@ -215,9 +215,9 @@ struct DPBXDDA2D {
                                  sign.z == 0  ? INFINITY
                                  : sign.z > 0 ? posInBrick.z
                                               : max - posInBrick.z};
-            depSign.x = (distToAxis.x <= distToAxis.y && distToAxis.x <= distToAxis.z) ? sign.x : 0;
-            depSign.y = (distToAxis.y <= distToAxis.z && distToAxis.y <= distToAxis.x) ? sign.y : 0;
-            depSign.z = (distToAxis.z <= distToAxis.x && distToAxis.z <= distToAxis.y) ? sign.z : 0;
+            depSign.x = (distToAxis.x < distToAxis.y && distToAxis.x <= distToAxis.z) ? sign.x : 0;
+            depSign.y = (distToAxis.y < distToAxis.z && distToAxis.y <= distToAxis.x) ? sign.y : 0;
+            depSign.z = (distToAxis.z < distToAxis.x && distToAxis.z <= distToAxis.y) ? sign.z : 0;
         }
 
         tDlt = glm::abs(vdbInfo.vDlts[0] / rayDir);
@@ -229,27 +229,21 @@ struct DPBXDDA2D {
             sign.x = 0;
             tSide.x = INFINITY;
             tDlt2Dep = glm::abs(rayDir.x);
-            //if (tDlt2Dep < Sqrt2Div2)
-            //    return false;
         }
         if (depSign.y != 0) {
             idx3InBlock.y = depSign.y == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
             sign.y = 0;
             tSide.y = INFINITY;
             tDlt2Dep = glm::abs(rayDir.y);
-            //if (tDlt2Dep < Sqrt2Div2)
-            //    return false;
         }
         if (depSign.z != 0) {
             idx3InBlock.z = depSign.z == 1 ? vdbInfo.minDepIdx : vdbInfo.maxDepIdx;
             sign.z = 0;
             tSide.z = INFINITY;
             tDlt2Dep = glm::abs(rayDir.z);
-            //if (tDlt2Dep < Sqrt2Div2)
-            //    return false;
         }
 
-        return depSign.x | depSign.y | depSign.z;
+        return (depSign.x | depSign.y | depSign.z);
     }
 
     __dpbxvdb_hostdev__ void StepNext() {

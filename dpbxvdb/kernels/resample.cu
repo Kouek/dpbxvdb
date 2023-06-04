@@ -70,6 +70,11 @@ void dpbxvdb::resampleDepth(const VDBInfo &vdbInfo, const VDBDeviceData &vdbDat)
             return;
 
         aIdx3 += aMin;
+        if ((depSign.x & depSign.y) || (depSign.y & depSign.z) || (depSign.z & depSign.x)) {
+            surf3Dwrite(0.f, vdbDat.atlasSurf, sizeof(float) * aIdx3.x, aIdx3.y, aIdx3.z);
+            return;
+        }
+
         auto pos = aIdx3 + apronWidAndDep * depSign;
         CoordValTy t = 0;
         while (true) {

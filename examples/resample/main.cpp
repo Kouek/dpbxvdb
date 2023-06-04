@@ -57,7 +57,7 @@ static void framebufferSizeCallback(GLFWwindow *window, int width, int height) {
         glDeleteTextures(1, &rndr.texID);
     rndr.res.x = width;
     rndr.res.y = height;
-    rndr.bkgrndCol = glm::vec3{.3f, .3f, .3f};
+    rndr.bkgrndCol = glm::vec3{.1f, .1f, .1f};
     rndr.dt = .25f;
 
     glGenTextures(1, &rndr.texID);
