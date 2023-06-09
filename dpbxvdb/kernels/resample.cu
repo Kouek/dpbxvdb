@@ -2,6 +2,40 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+thrust::device_vector<float> dpbxvdb::loadByAxisTransform(const std::vector<float> &src,
+                                                          const CoordTy &oldVoxPerVol,
+                                                          const AxisTransform &axisTr) {
+    if (axisTr.IsNatural())
+        return thrust::device_vector<float>(src);
+
+    thrust::device_vector<float> tmp(src);
+    thrust::device_vector<float> ret(src.size());
+    auto krnlFn = [dst = thrust::raw_pointer_cast(ret.data()),
+                   src = thrust::raw_pointer_cast(tmp.data()), oldVoxPerVol, axisTr,
+                   dimYX = static_cast<size_t>(
+                       oldVoxPerVol.y * oldVoxPerVol.x)] __device__(CoordTy oldIdx3, IDTy oldIdx) {
+        CoordTy idx3;
+        for (uint8_t xyz = 0; xyz < 3; ++xyz) {
+            auto trAxis = axisTr[xyz] % 3;
+            if (axisTr[xyz] / 3 != 0)
+                idx3[xyz] = oldVoxPerVol[trAxis] - 1 - oldIdx3[trAxis];
+            else
+                idx3[xyz] = oldIdx3[trAxis];
+        }
+
+        auto idx = idx3.z * dimYX + idx3.y * oldVoxPerVol.x + idx3.x;
+        dst[idx] = src[oldIdx];
+    };
+    dim3 threadPerBlock{8, 8, 8};
+    dim3 blockPerGrid{
+        (static_cast<decltype(dim3::x)>(oldVoxPerVol.x) + threadPerBlock.x - 1) / threadPerBlock.x,
+        (static_cast<decltype(dim3::x)>(oldVoxPerVol.y) + threadPerBlock.y - 1) / threadPerBlock.y,
+        (static_cast<decltype(dim3::x)>(oldVoxPerVol.z) + threadPerBlock.z - 1) / threadPerBlock.z};
+    parallelExec3D<<<blockPerGrid, threadPerBlock>>>(krnlFn, oldVoxPerVol);
+
+    return ret;
+}
+
 void dpbxvdb::resample(const thrust::device_vector<float> &d_src, const VDBInfo &vdbInfo,
                        const VDBDeviceData &vdbDat) {
     auto apronWidAndDep = static_cast<CoordValTy>(vdbInfo.apronWidAndDep);

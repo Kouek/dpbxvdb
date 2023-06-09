@@ -31,6 +31,25 @@ constexpr auto Epsilon = .001f;
 
 constexpr uint8_t MaxLevNum = 3;
 
+struct AxisTransform {
+    uint8_t x;
+    uint8_t y;
+    uint8_t z;
+
+    __dpbxvdb_hostdev__ const uint8_t operator[](uint8_t i) const {
+        return i == 0 ? x : i == 1 ? y : z;
+    }
+
+    __dpbxvdb_hostdev__ bool IsNatural() const { return x == 0 && y == 1 && z == 2; }
+
+    __dpbxvdb_hostdev__ glm::uvec3 TransformDimension(const glm::uvec3 &oldDim) const {
+        glm::uvec3 newDim;
+        for (uint8_t xyz = 0; xyz < 3; ++xyz)
+            newDim[xyz] = oldDim[(*this)[xyz] % 3];
+        return newDim;
+    }
+};
+
 template <typename F> void __global__ parallelExec3D(F f, CoordTy dim) {
     CoordTy idx3{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y,
                  blockIdx.z * blockDim.z + threadIdx.z};

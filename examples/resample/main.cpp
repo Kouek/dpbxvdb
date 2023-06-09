@@ -24,7 +24,7 @@ static RawVolume<DpbxRawVoxTy> volume;
 static std::string volPath;
 static glm::uvec3 volDim;
 static DpbxRawVoxTy volThresh;
-static AxisTransform volAxisTr{0, 1, 2};
+static dpbxvdb::AxisTransform volAxisTr{0, 1, 2};
 
 static RenderParam rndr;
 static RenderTarget rndrTarget = RenderTarget::Vol;
@@ -206,13 +206,17 @@ int main(int argc, char **argv) {
     volAxisTr.x = parser.get<uint8_t>("tx");
     volAxisTr.y = parser.get<uint8_t>("ty");
     volAxisTr.z = parser.get<uint8_t>("tz");
-    volAxisTr = [&]() -> AxisTransform {
+    volAxisTr = [&]() {
         std::array<uint8_t, 3> hasVal{0};
         for (uint8_t xyz = 0; xyz < 3; ++xyz)
             ++hasVal[volAxisTr[xyz] % 3];
         for (auto v : hasVal)
-            if (v == 0 || v >= 2)
-                return {0, 1, 2};
+            if (v == 0 || v >= 2) {
+                std::cout << "Input option (tx, ty, tz) is invalid, (tx, ty, tz) is set to default "
+                             "(0, 1, 2)"
+                          << std::endl;
+                return dpbxvdb::AxisTransform{0, 1, 2};
+            }
         return volAxisTr;
     }();
 

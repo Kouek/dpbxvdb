@@ -88,16 +88,17 @@ class Tree {
         setState(State::NeedRebuild);
     }
 
-    void RebuildAsDense(const std::vector<float> &src, const CoordTy &voxPerVol) {
+    void RebuildAsDense(const std::vector<float> &src, const CoordTy &oldVoxPerVol,
+                        const AxisTransform &axisTr = {0, 1, 2}) {
         info.thresh = 0.f;
-        info.voxPerVol = voxPerVol;
-        info.brickPerVol = {(voxPerVol.x + info.dims[0] - 1) / info.dims[0],
-                            (voxPerVol.y + info.dims[0] - 1) / info.dims[0],
-                            (voxPerVol.z + info.dims[0] - 1) / info.dims[0]};
+        info.voxPerVol = axisTr.TransformDimension(oldVoxPerVol);
+        info.brickPerVol = {(info.voxPerVol.x + info.dims[0] - 1) / info.dims[0],
+                            (info.voxPerVol.y + info.dims[0] - 1) / info.dims[0],
+                            (info.voxPerVol.z + info.dims[0] - 1) / info.dims[0]};
 
         clearHostData();
 
-        thrust::device_vector<float> d_src(src);
+        auto d_src = loadByAxisTransform(src, oldVoxPerVol, axisTr);
         {
             for (CoordValTy z = 0; z < info.brickPerVol.z; ++z)
                 for (CoordValTy y = 0; y < info.brickPerVol.y; ++y)
@@ -113,16 +114,17 @@ class Tree {
         setState(State::NeedRebuild, false);
     }
 
-    void RebuildAsSparse(const std::vector<float> &src, const CoordTy &voxPerVol, float threshold) {
+    void RebuildAsSparse(const std::vector<float> &src, const CoordTy &oldVoxPerVol,
+                         float threshold, const AxisTransform &axisTr = {0, 1, 2}) {
         info.thresh = threshold;
-        info.voxPerVol = voxPerVol;
-        info.brickPerVol = {(voxPerVol.x + info.dims[0] - 1) / info.dims[0],
-                            (voxPerVol.y + info.dims[0] - 1) / info.dims[0],
-                            (voxPerVol.z + info.dims[0] - 1) / info.dims[0]};
+        info.voxPerVol = axisTr.TransformDimension(oldVoxPerVol);
+        info.brickPerVol = {(info.voxPerVol.x + info.dims[0] - 1) / info.dims[0],
+                            (info.voxPerVol.y + info.dims[0] - 1) / info.dims[0],
+                            (info.voxPerVol.z + info.dims[0] - 1) / info.dims[0]};
 
         clearHostData();
 
-        thrust::device_vector<float> d_src(src);
+        auto d_src = loadByAxisTransform(src, oldVoxPerVol, axisTr);
         {
             auto downsampled = downsample(d_src, downsamplePolicy, info);
             for (CoordValTy z = 0; z < info.brickPerVol.z; ++z)
