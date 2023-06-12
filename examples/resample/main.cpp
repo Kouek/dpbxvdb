@@ -22,7 +22,8 @@
 
 static RawVolume<DpbxRawVoxTy> volume;
 static std::string volPath;
-static glm::uvec3 volDim;
+static glm::uvec3 oldVoxPerVol;
+static glm::uvec3 newVoxPerVol;
 static DpbxRawVoxTy volThresh;
 static dpbxvdb::AxisTransform volAxisTr{0, 1, 2};
 
@@ -53,12 +54,13 @@ inline void startReRndrCntDown() {
 }
 
 static void framebufferSizeCallback(GLFWwindow *window, int width, int height) {
+    if (width == 0 || height == 0)
+        return;
+
     if (rndr.texID != 0)
         glDeleteTextures(1, &rndr.texID);
     rndr.res.x = width;
     rndr.res.y = height;
-    rndr.bkgrndCol = glm::vec3{.1f, .1f, .1f};
-    rndr.dt = .25f;
 
     glGenTextures(1, &rndr.texID);
     glBindTexture(GL_TEXTURE_2D, rndr.texID);
@@ -78,13 +80,6 @@ static void framebufferSizeCallback(GLFWwindow *window, int width, int height) {
     startReRndrCntDown();
 }
 
-static void windowCloseCallback(GLFWwindow *window) {
-    release();
-
-    if (rndr.texID != 0)
-        glDeleteTextures(1, &rndr.texID);
-}
-
 static void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods) {
     const auto rotSens = glm::radians(30.f);
     const auto movSens = .02f * camFarClip;
@@ -98,10 +93,12 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
         case GLFW_KEY_RIGHT:
         case GLFW_KEY_Q:
         case GLFW_KEY_E:
-            cam2CntrDist = glm::distance(camera.GetPos(), .5f * voxSpacing * glm::vec3{volDim});
+            cam2CntrDist =
+                glm::distance(camera.GetPos(), .5f * voxSpacing * glm::vec3{newVoxPerVol});
             break;
         case GLFW_KEY_U:
             drawUI = !drawUI;
+            glfwSetInputMode(window, GLFW_CURSOR, drawUI ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
             break;
         }
 
@@ -152,18 +149,9 @@ static void keyCallback(GLFWwindow *window, int key, int scancode, int action, i
 
 static void loadVol() {
     if (isSparse)
-        volume.LoadAsSparse(volPath, volDim, volThresh, useDPBX, log2Dims, volAxisTr);
+        volume.LoadAsSparse(volPath, oldVoxPerVol, volThresh, useDPBX, log2Dims, volAxisTr);
     else
-        volume.LoadAsDense(volPath, volDim, useDPBX, log2Dims, volAxisTr);
-    static auto first = true;
-    if (first) {
-        camera.LookAt(glm::vec3{.5f, .5f, 1.2f} * voxSpacing * glm::vec3{volDim},
-                      .5f * voxSpacing * glm::vec3{volDim});
-        camFarClip = 1.7f * std::max({voxSpacing.x * volDim.x, voxSpacing.y * volDim.y,
-                                      voxSpacing.z * volDim.z});
-
-        first = false;
-    }
+        volume.LoadAsDense(volPath, oldVoxPerVol, useDPBX, log2Dims, volAxisTr);
 
     setDPBXParam(volume.GetVDB().GetInfo(), volume.GetVDB().GetDeviceData());
 }
@@ -171,9 +159,12 @@ static void loadVol() {
 int main(int argc, char **argv) {
     cli::Parser parser(argc, argv);
     parser.set_required<std::string>("vol", "volume", "Path of raw volume file");
-    parser.set_required<glm::uint>("dx", "dim-x", "Dimension of volume on X-axis");
-    parser.set_required<glm::uint>("dy", "dim-y", "Dimension of volume on Y-axis");
-    parser.set_required<glm::uint>("dz", "dim-z", "Dimension of volume on Z-axis");
+    parser.set_required<glm::uint>("dx", "dim-x",
+                                   "Dimension of volume on X-axis (before axis transformation)");
+    parser.set_required<glm::uint>("dy", "dim-y",
+                                   "Dimension of volume on Y-axis (before axis transformation)");
+    parser.set_required<glm::uint>("dz", "dim-z",
+                                   "Dimension of volume on Z-axis (before axis transformation)");
     parser.set_required<DpbxRawVoxTy>("th", "threshold",
                                       "Threshold of voxel density to denoise volume");
     parser.set_optional<std::string>("tf", "transfer-func", "",
@@ -190,9 +181,9 @@ int main(int argc, char **argv) {
     }
 
     volPath = parser.get<std::string>("vol");
-    volDim.x = parser.get<glm::uint>("dx");
-    volDim.y = parser.get<glm::uint>("dy");
-    volDim.z = parser.get<glm::uint>("dz");
+    oldVoxPerVol.x = parser.get<glm::uint>("dx");
+    oldVoxPerVol.y = parser.get<glm::uint>("dy");
+    oldVoxPerVol.z = parser.get<glm::uint>("dz");
     volThresh = parser.get<DpbxRawVoxTy>("th");
 
     if (auto sx = parser.get<float>("sx"); sx != -1.f)
@@ -220,9 +211,22 @@ int main(int argc, char **argv) {
         return volAxisTr;
     }();
 
+    newVoxPerVol = volAxisTr.TransformDimension(oldVoxPerVol);
+
+    rndr.dt = .25f;
+    rndr.bkgrndCol = glm::vec3{.1f, .1f, .1f};
     rndr.usePhongShading = false;
-    rndr.ka = rndr.kd = rndr.ks = .5f;
-    rndr.shininess = 64.f;
+    rndr.lightCol = glm::vec3{1.f, 1.f, 1.f};
+    rndr.lightPos = voxSpacing * glm::vec3{.5f, 1.5f, .5f} * glm::vec3{newVoxPerVol};
+    rndr.ka = .5f;
+    rndr.kd = .5f;
+    rndr.ks = .5f;
+    rndr.shininess = 16.f;
+
+    camera.LookAt(glm::vec3{.5f, .5f, 1.5f} * voxSpacing * glm::vec3{newVoxPerVol},
+                  .5f * voxSpacing * glm::vec3{newVoxPerVol});
+    camFarClip = 1.7f * std::max({voxSpacing.x * newVoxPerVol.x, voxSpacing.y * newVoxPerVol.y,
+                                  voxSpacing.z * newVoxPerVol.z});
 
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -238,7 +242,6 @@ int main(int argc, char **argv) {
 
     glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);
-    glfwSetWindowCloseCallback(window, windowCloseCallback);
     glfwSetKeyCallback(window, keyCallback);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -293,6 +296,8 @@ int main(int argc, char **argv) {
     glUseProgram(glRes.shader->prog);
     glClearColor(0.f, 0.f, 0.f, 0.f);
     while (!glfwWindowShouldClose(window)) {
+        auto reSetRndrParam = false;
+
         if (reRndrCntDownOn) {
             auto curr = std::chrono::system_clock::now();
             auto duration =
@@ -321,7 +326,7 @@ int main(int argc, char **argv) {
                 if (ImGui::DragFloat3("Voxel Spacing", &voxSpacing[0], .1f, dpbxvdb::Epsilon,
                                       std::numeric_limits<float>::infinity())) {
                     invVoxSpacing = 1.f / voxSpacing;
-                    reRndr = true;
+                    reSetRndrParam = true;
                 }
             }
             ImGui::End();
@@ -343,29 +348,29 @@ int main(int argc, char **argv) {
                         }
                 }
                 {
-                    bool reSetRndrParam = false;
                     if (ImGui::RadioButton("Use Phong Shading", rndr.usePhongShading)) {
                         rndr.usePhongShading = !rndr.usePhongShading;
                         reSetRndrParam = true;
                     }
-                    ImGui::PushItemWidth(100.f);
+
                     if (ImGui::InputFloat("ka", &rndr.ka, .05f, .1f))
                         reSetRndrParam = true;
-                    ImGui::SameLine();
                     if (ImGui::InputFloat("kd", &rndr.kd, .05f, .1f))
                         reSetRndrParam = true;
-                    ImGui::SameLine();
                     if (ImGui::InputFloat("ks", &rndr.ks, .05f, .1f))
                         reSetRndrParam = true;
-                    ImGui::SameLine();
                     if (ImGui::InputFloat("shininess", &rndr.shininess, 0.f, 0.f))
                         reSetRndrParam = true;
-                    if (reSetRndrParam) {
-                        int w, h;
-                        glfwGetFramebufferSize(window, &w, &h);
-                        framebufferSizeCallback(window, w, h);
-                        reRndr = true;
-                    }
+                    if (ImGui::ColorEdit3("light color", reinterpret_cast<float *>(&rndr.lightCol)))
+                        reSetRndrParam = true;
+
+                    ImGui::Text("light position:");
+                    ImGui::PushItemWidth(100.f);
+                    if (ImGui::InputFloat("x", &rndr.lightPos.x, 10.f, 50.f))
+                        reSetRndrParam = true;
+                    ImGui::SameLine();
+                    if (ImGui::InputFloat("z", &rndr.lightPos.z, 10.f, 50.f))
+                        reSetRndrParam = true;
                     ImGui::PopItemWidth();
                 }
             }
@@ -415,9 +420,63 @@ int main(int argc, char **argv) {
         if (drawUI)
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+        if (reSetRndrParam) {
+            int w, h;
+            glfwGetFramebufferSize(window, &w, &h);
+            framebufferSizeCallback(window, w, h);
+            reRndr = true;
+        }
         glfwPollEvents();
         glfwSwapBuffers(window);
     }
+
+#ifdef ENABLE_PERFORMANCE_TEST
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+    {
+        std::array dists{300.f, 150.f};
+        auto dAng = 2.f;
+        for (float dist : dists) {
+            camera.SetPos(glm::vec3{.5f, .5f, .5f} * voxSpacing * glm::vec3{newVoxPerVol} +
+                          dist * glm::vec3{0.f, 0.f, 1.f});
+            cam2CntrDist =
+                glm::distance(camera.GetPos(), .5f * voxSpacing * glm::vec3{newVoxPerVol});
+
+            auto ang = 0.f;
+            auto totCostInMs = 0.f;
+            uint32_t cnt = 0;
+            while (ang <= 360.f) {
+                camera.Revolve(cam2CntrDist, -dAng, 0.f);
+
+                const auto &[R, F, U, P] = camera.GetRFUP();
+                auto tr = glm::scale(glm::identity<glm::mat4>(), invVoxSpacing);
+                tr = tr * glm::mat4{R.x,  R.y,  R.z,  0.f, U.x, U.y, U.z, 0.f,
+                                    -F.x, -F.y, -F.z, 0.f, P.x, P.y, P.z, 1.f};
+                render(camUnProj, tr, rndrTarget, costInMs);
+                totCostInMs += costInMs;
+
+                glViewport(0, 0, rndr.res.x, rndr.res.y);
+                glClear(GL_COLOR_BUFFER_BIT);
+
+                glBindTexture(GL_TEXTURE_2D, rndr.texID);
+                glBindVertexArray(glRes.VAO);
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);
+                glBindVertexArray(0);
+                glBindTexture(GL_TEXTURE_2D, 0);
+
+                glfwPollEvents();
+                glfwSwapBuffers(window);
+
+                ang += dAng;
+                ++cnt;
+            }
+
+            std::cout << std::format("Revolving at distance {} costs {} ms (avg {} ms, avg {} fps)",
+                                     dist, totCostInMs, totCostInMs / cnt,
+                                     1000.f * cnt / totCostInMs)
+                      << std::endl;
+        }
+    }
+#endif // ENABLE_PERFORMANCE_TEST
 
 TERMINAL:
     ImPlot::DestroyContext();
@@ -425,6 +484,10 @@ TERMINAL:
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+
+    release();
+    if (rndr.texID != 0)
+        glDeleteTextures(1, &rndr.texID);
 
     releaseGLRes(glRes);
     glfwTerminate();

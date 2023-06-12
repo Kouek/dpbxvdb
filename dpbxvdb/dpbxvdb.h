@@ -79,9 +79,8 @@ class Tree {
 
         info.useDPBX = useDPBX;
         info.apronWidth = apronWidth;
-        info.voxPerAtlasBrick =
-            info.dims[0] + ((static_cast<CoordValTy>(apronWidth) + (useDPBX ? 1 : 0)) << 1);
         info.apronWidAndDep = apronWidth + (useDPBX ? 1 : 0);
+        info.voxPerAtlasBrick = info.dims[0] + (info.apronWidAndDep << 1);
         info.minDepIdx = -static_cast<CoordValTy>(info.apronWidAndDep);
         info.maxDepIdx = info.dims[0] - 1 + info.apronWidAndDep;
 

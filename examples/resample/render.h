@@ -11,6 +11,8 @@
 
 #include <cuda_runtime.h>
 
+#define ENABLE_PERFORMANCE_TEST
+
 using DpbxRawVoxTy = uint8_t;
 
 struct RenderParam {
@@ -18,6 +20,8 @@ struct RenderParam {
     GLuint texID;
     glm::uvec2 res;
     glm::vec3 bkgrndCol;
+    glm::vec3 lightPos;
+    glm::vec3 lightCol;
     float dt;
     float ka, kd, ks, shininess;
 };

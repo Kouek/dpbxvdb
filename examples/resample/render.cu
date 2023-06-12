@@ -10,6 +10,8 @@ struct CURenderParam {
     bool usePhongShading;
     glm::uvec2 res;
     glm::vec3 bkgrndCol;
+    glm::vec3 lightPos;
+    glm::vec3 lightCol;
     float thresh;
     float dt;
     float ka, kd, ks, shininess;
@@ -41,6 +43,8 @@ void setRenderParam(const RenderParam &param) {
     rndr.res = param.res;
     rndr.bkgrndCol = param.bkgrndCol;
     rndr.usePhongShading = param.usePhongShading;
+    rndr.lightPos = param.lightPos;
+    rndr.lightCol = param.lightCol;
     rndr.dt = param.dt;
     rndr.ka = param.ka;
     rndr.kd = param.kd;
@@ -113,51 +117,61 @@ inline __device__ glm::vec3 pix2RayDir(const glm::uvec2 &pix, const glm::mat4 &u
     return rayDir;
 }
 
-inline __device__ void integralColor(glm::vec3 &rgb, float &a, const glm::vec3 &LR,
-                                     const glm::vec3 &posInBrick, const glm::vec3 &aMin) {
+inline __device__ void integralColor(glm::vec3 &rgb, float &a, const glm::vec3 &surf2LightDir,
+                                     const glm::vec3 &surf2CamDir, const glm::vec3 &posInBrick,
+                                     const glm::vec3 &aMin, float voxPerBrick) {
     if (dc_rndr.usePhongShading) {
         auto v = tex3D<float>(dc_vdbDat.atlasTex, aMin.x + posInBrick.x, aMin.y + posInBrick.y,
                               aMin.z + posInBrick.z);
         auto N = [&]() {
             glm::vec3 ret;
-            float v0, v1;
+            glm::vec3 samplePos{aMin.x + posInBrick.x, aMin.y + posInBrick.y,
+                                aMin.z + posInBrick.z};
+            float v0, v1, pTmp;
 #pragma unroll
             for (uint8_t xyz = 0; xyz < 3; ++xyz) {
-                v0 =
-                    tex3D<float>(dc_vdbDat.atlasTex, aMin.x + posInBrick.x + (xyz == 0 ? 1.f : 0.f),
-                                 aMin.y + posInBrick.y + (xyz == 1 ? 1.f : 0.f),
-                                 aMin.z + posInBrick.z + (xyz == 2 ? 1.f : 0.f));
-                v1 =
-                    tex3D<float>(dc_vdbDat.atlasTex, aMin.x + posInBrick.x - (xyz == 0 ? 1.f : 0.f),
-                                 aMin.y + posInBrick.y - (xyz == 1 ? 1.f : 0.f),
-                                 aMin.z + posInBrick.z - (xyz == 2 ? 1.f : 0.f));
+                pTmp = samplePos[xyz];
+
+                samplePos[xyz] = pTmp + 1.f;
+                v0 = tex3D<float>(dc_vdbDat.atlasTex, samplePos.x, samplePos.y, samplePos.z);
+                
+                samplePos[xyz] = pTmp - 1.f;
+                v1 = tex3D<float>(dc_vdbDat.atlasTex, samplePos.x, samplePos.y, samplePos.z);
+
+                samplePos[xyz] = pTmp;
                 ret[xyz] = v1 - v0;
             }
-            return ret;
+            return glm::normalize(ret);
         }();
-        if (glm::dot(N, LR) < 0.f)
+        if (glm::dot(N, surf2CamDir) < 0.f)
             N *= -1.f;
 
-        auto col = transferFunc(v);
-        auto diffCol = glm::vec3{col};
-        auto ambient = dc_rndr.ka * diffCol;
-        auto NdtLR = glm::dot(N, LR);
-        auto specular = dc_rndr.ks * glm::pow(NdtLR, dc_rndr.shininess);
-        auto diffuse = dc_rndr.kd * NdtLR * diffCol;
+        auto col4 = transferFunc(v);
+        auto col3 = glm::vec3{col4};
+
+        auto ambient = dc_rndr.ka * col3;
+        auto diffuse =
+            dc_rndr.kd * glm::max(0.f, glm::dot(N, surf2LightDir)) * col3 * dc_rndr.lightCol;
+        auto specular = [&]() {
+            auto hfDir = glm::normalize(surf2CamDir + surf2LightDir);
+            return dc_rndr.ks * glm::pow(glm::max(0.f, glm::dot(N, hfDir)), dc_rndr.shininess) *
+                   dc_rndr.lightCol;
+        }();
+
 #pragma unroll
         for (uint8_t xyz = 0; xyz < 3; ++xyz)
-            diffCol[xyz] = col[xyz] = ambient[xyz] + diffuse[xyz] + specular;
+            col4[xyz] = col3[xyz] = ambient[xyz] + diffuse[xyz] + specular[xyz];
 
-        rgb = rgb + (1.f - a) * col.a * diffCol;
-        a = a + (1.f - a) * col.a;
+        rgb = rgb + (1.f - a) * col4.a * col3;
+        a = a + (1.f - a) * col4.a;
     } else {
         auto v = tex3D<float>(dc_vdbDat.atlasTex, aMin.x + posInBrick.x, aMin.y + posInBrick.y,
                               aMin.z + posInBrick.z);
-        auto col = transferFunc(v);
-        auto diffCol = glm::vec3{col};
+        auto col4 = transferFunc(v);
+        auto col3 = glm::vec3{col4};
 
-        rgb = rgb + (1.f - a) * col.a * diffCol;
-        a = a + (1.f - a) * col.a;
+        rgb = rgb + (1.f - a) * col4.a * col3;
+        a = a + (1.f - a) * col4.a;
     }
 }
 
@@ -191,6 +205,73 @@ inline __device__ bool trySkipBirck(float &t, const glm::vec3 &rayPos, const glm
     return false;
 }
 
+inline __device__ void normalBrickFn(glm::vec3 &rgb, float &alpha, const glm::vec3 &camPos,
+                                     const glm::vec3 &rayDir, const glm::vec3 &surf2CamDir,
+                                     float tStart, dpbxvdb::IDTy leafIdx, float tMax,
+                                     float voxPerBrick) {
+    auto t = dc_rndr.dt * glm::ceil(tStart / dc_rndr.dt);
+    auto &leaf = dc_vdbDat.nodePools[0][leafIdx];
+    glm::vec3 aMin = leaf.atlasIdx3;
+    glm::vec3 vMin = leaf.idx3;
+    auto lightPosInBrick = dc_rndr.lightPos - vMin;
+    auto posInBrick = camPos + t * rayDir - vMin;
+    auto dPos = dc_rndr.dt * rayDir;
+
+    while (true) {
+        auto stop = t > tMax;
+#pragma unroll
+        for (uint8_t xyz = 0; xyz < 3; ++xyz)
+            if (posInBrick[xyz] < 0.f || posInBrick[xyz] >= voxPerBrick) {
+                stop = true;
+                break;
+            }
+        if (stop)
+            break;
+
+        auto surf2LightDir = glm::normalize(lightPosInBrick - posInBrick);
+        integralColor(rgb, alpha, surf2LightDir, surf2CamDir, posInBrick, aMin, voxPerBrick);
+
+        t += dc_rndr.dt;
+        posInBrick += dPos;
+    }
+}
+
+inline __device__ void dpbxBrickFn(glm::vec3 &rgb, float &alpha, const glm::vec3 &camPos,
+                                   const glm::vec3 &rayDir, const glm::vec3 &surf2CamDir,
+                                   float tStart, dpbxvdb::IDTy leafIdx, float tMax,
+                                   float voxPerBrick) {
+    auto t = dc_rndr.dt * glm::ceil(tStart / dc_rndr.dt);
+    auto &leaf = dc_vdbDat.nodePools[0][leafIdx];
+    glm::vec3 aMin = leaf.atlasIdx3;
+    glm::vec3 vMin = leaf.idx3;
+    auto lightPosInBrick = dc_rndr.lightPos - vMin;
+    auto posInBrick = camPos + t * rayDir - vMin;
+    auto dPos = dc_rndr.dt * rayDir;
+
+    auto skipBrick = trySkipBirck(t, camPos, rayDir, tMax, posInBrick, aMin);
+    if (skipBrick)
+        return;
+
+    posInBrick = camPos + t * rayDir - vMin;
+    while (true) {
+        auto stop = t > tMax;
+#pragma unroll
+        for (uint8_t xyz = 0; xyz < 3; ++xyz)
+            if (posInBrick[xyz] < 0.f || posInBrick[xyz] >= voxPerBrick) {
+                stop = true;
+                break;
+            }
+        if (stop)
+            break;
+
+        auto surf2LightDir = glm::normalize(lightPosInBrick - posInBrick);
+        integralColor(rgb, alpha, surf2LightDir, surf2CamDir, posInBrick, aMin, voxPerBrick);
+
+        t += dc_rndr.dt;
+        posInBrick += dPos;
+    }
+}
+
 __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm::mat4 tr) {
     using namespace dpbxvdb;
 
@@ -200,7 +281,7 @@ __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm:
 
     glm::vec3 camPos = tr[3];
     auto rayDir = pix2RayDir(pix, unProj, tr);
-    auto LR = -rayDir;
+    auto surf2CamDir = -rayDir;
     const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
     auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
     if (tStart.z < 0.f) {
@@ -225,31 +306,6 @@ __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm:
     auto rgb = glm::zero<glm::vec3>();
     auto alpha = 0.f;
 
-    auto brickFn = [&]() {
-        auto t = dc_rndr.dt * glm::ceil(hdda.t.x / dc_rndr.dt);
-        auto &leaf = dc_vdbDat.nodePools[0][nodeIdxStk[0]];
-        glm::vec3 aMin = leaf.atlasIdx3;
-        auto posInBrick = camPos + t * rayDir - glm::vec3{leaf.idx3};
-        auto dPos = dc_rndr.dt * rayDir;
-
-        while (true) {
-            auto stop = t > tMaxStk[0];
-#pragma unroll
-            for (uint8_t xyz = 0; xyz < 3; ++xyz)
-                if (posInBrick[xyz] < 0.f || posInBrick[xyz] >= voxPerBrick) {
-                    stop = true;
-                    break;
-                }
-            if (stop)
-                break;
-
-            integralColor(rgb, alpha, LR, posInBrick, aMin);
-
-            t += dc_rndr.dt;
-            posInBrick += dPos;
-        }
-    };
-
     while (true) {
         auto stop = lev > dc_vdbInfo.topLev;
 #pragma unroll
@@ -268,119 +324,12 @@ __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm:
                 nodeIdxStk[0] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
                 hdda.t.x += Epsilon;
                 tMaxStk[0] = hdda.t.y - Epsilon;
-                brickFn();
-                hdda.Step();
-            } else {
-                --lev;
-                nodeIdxStk[lev] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
-                node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
-                hdda.t.x += Epsilon;
-                tMaxStk[lev] = hdda.t.y - Epsilon;
-                hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
-            }
-        } else
-            hdda.Step();
-
-        while (hdda.t.x > tMaxStk[lev] && lev <= dc_vdbInfo.topLev) {
-            ++lev;
-            if (lev <= dc_vdbInfo.topLev) {
-                node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
-                hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
-            }
-        }
-    }
-
-#pragma unroll
-    for (uint8_t xyz = 0; xyz < 3; ++xyz)
-        rgb[xyz] = glm::pow(rgb[xyz], GammaCorrCoef);
-    mixForeBackGround(rgb, alpha);
-    surf2Dwrite(glmVec3ToUChar4(rgb), outSurf, pix.x * sizeof(uchar4), pix.y);
-}
-
-__global__ void renderDPBXKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm::mat4 tr) {
-    using namespace dpbxvdb;
-
-    glm::uvec2 pix{blockIdx.x * blockDim.x + threadIdx.x, blockIdx.y * blockDim.y + threadIdx.y};
-    if (pix.x >= dc_rndr.res.x || pix.y >= dc_rndr.res.y)
-        return;
-
-    glm::vec3 camPos = tr[3];
-    auto rayDir = pix2RayDir(pix, unProj, tr);
-    auto LR = -rayDir;
-    const auto AABBMax = glm::vec3(dc_vdbInfo.voxPerVol);
-    auto tStart = rayIntersectAABB(camPos, rayDir, glm::zero<glm::vec3>(), AABBMax);
-    if (tStart.z < 0.f) {
-        surf2Dwrite(glmVec3ToUChar4(dc_rndr.bkgrndCol), outSurf, pix.x * sizeof(uchar4), pix.y);
-        return;
-    }
-
-    auto lev = dc_vdbInfo.topLev;
-    float voxPerBrick = dc_vdbInfo.dims[0];
-    float tMaxStk[MaxLevNum];
-    tStart.x += Epsilon;
-    tMaxStk[lev] = tStart.y - Epsilon;
-
-    IDTy nodeIdxStk[MaxLevNum];
-    auto &node = dc_vdbDat.nodePools[lev][0];
-    nodeIdxStk[lev] = 0;
-
-    HDDA3D hdda;
-    hdda.Init(camPos, rayDir, tStart);
-    hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
-
-    auto rgb = glm::zero<glm::vec3>();
-    auto alpha = 0.f;
-
-    auto brickFn = [&]() {
-        auto t = dc_rndr.dt * glm::ceil(hdda.t.x / dc_rndr.dt);
-        auto &leaf = dc_vdbDat.nodePools[0][nodeIdxStk[0]];
-        glm::vec3 aMin = leaf.atlasIdx3;
-        glm::vec3 vMin = leaf.idx3;
-        auto posInBrick = camPos + t * rayDir - vMin;
-        auto dPos = dc_rndr.dt * rayDir;
-
-        auto skipBrick = trySkipBirck(t, camPos, rayDir, tMaxStk[0], posInBrick, aMin);
-        if (skipBrick)
-            return;
-
-        posInBrick = camPos + t * rayDir - vMin;
-        while (true) {
-            auto stop = t > tMaxStk[0];
-#pragma unroll
-            for (uint8_t xyz = 0; xyz < 3; ++xyz)
-                if (posInBrick[xyz] < 0.f || posInBrick[xyz] >= voxPerBrick) {
-                    stop = true;
-                    break;
-                }
-            if (stop)
-                break;
-
-            integralColor(rgb, alpha, LR, posInBrick, aMin);
-
-            t += dc_rndr.dt;
-            posInBrick += dPos;
-        }
-    };
-
-    while (true) {
-        auto stop = lev > dc_vdbInfo.topLev;
-#pragma unroll
-        for (uint8_t xyz = 0; xyz < 3; ++xyz)
-            if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
-                stop = true;
-                break;
-            }
-        if (stop)
-            break;
-
-        hdda.Next();
-        auto chIdx = dc_vdbInfo.PosInBrick2ChildIdx(hdda.chIdx3, lev);
-        if (IsChildOn(dc_vdbDat, node, chIdx)) {
-            if (lev == 1) {
-                nodeIdxStk[0] = Node::ID2Idx(GetChildID(dc_vdbDat, node, chIdx));
-                hdda.t.x += Epsilon;
-                tMaxStk[0] = hdda.t.y - Epsilon;
-                brickFn();
+                if (dc_vdbInfo.useDPBX)
+                    dpbxBrickFn(rgb, alpha, camPos, rayDir, surf2CamDir, hdda.t.x, nodeIdxStk[0],
+                                tMaxStk[0], voxPerBrick);
+                else
+                    normalBrickFn(rgb, alpha, camPos, rayDir, surf2CamDir, hdda.t.x, nodeIdxStk[0],
+                                  tMaxStk[0], voxPerBrick);
                 hdda.Step();
             } else {
                 --lev;
@@ -723,10 +672,7 @@ void render(const glm::mat4 &unProj, const glm::mat4 &tr, RenderTarget rndrTarge
     cudaEventRecord(start);
     switch (rndrTarget) {
     case RenderTarget::Vol:
-        if (vdbInfo.useDPBX)
-            renderDPBXKernel<<<grid, block>>>(outSurf, unProj, tr);
-        else
-            renderKernel<<<grid, block>>>(outSurf, unProj, tr);
+        renderKernel<<<grid, block>>>(outSurf, unProj, tr);
         break;
     case RenderTarget::Depth:
         renderDepthKernel<<<grid, block>>>(outSurf, unProj, tr);
