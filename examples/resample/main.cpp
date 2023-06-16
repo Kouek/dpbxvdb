@@ -33,7 +33,7 @@ static RenderTarget rndrTarget = RenderTarget::Vol;
 static auto drawUI = true;
 static auto isSparse = true;
 static auto useDPBX = true;
-static std::array<uint8_t, 3> log2Dims{4, 5, 5};
+static std::array<uint8_t, 3> log2Dims;
 static float costInMs = 0.f;
 
 static auto reRndr = true;
@@ -172,6 +172,9 @@ int main(int argc, char **argv) {
     parser.set_optional<float>("sx", "spacing-x", -1.f, "Spacing of voxel on X-axis");
     parser.set_optional<float>("sy", "spacing-y", -1.f, "Spacing of voxel on Y-axis");
     parser.set_optional<float>("sz", "spacing-z", -1.f, "Spacing of voxel on Z-axis");
+    parser.set_optional<uint8_t>("ld0", "log2-dim-0", 4, "Log2-dimension of VDB at level 0");
+    parser.set_optional<uint8_t>("ld1", "log2-dim-1", 5, "Log2-dimension of VDB at level 1");
+    parser.set_optional<uint8_t>("ld2", "log2-dim-2", 5, "Log2-dimension of VDB at level 2");
     {
         std::string trDesc(", 0 for X, 1 for Y and 2 for Z, while 3 for -X, 4 for -Y and 5 for -Z");
         parser.set_optional<uint8_t>("tx", "tr-x", 0, "Transform of X-axis" + trDesc);
@@ -212,6 +215,30 @@ int main(int argc, char **argv) {
     }();
 
     newVoxPerVol = volAxisTr.TransformDimension(oldVoxPerVol);
+
+    log2Dims[0] = parser.get<uint8_t>("ld0");
+    log2Dims[1] = parser.get<uint8_t>("ld1");
+    log2Dims[2] = parser.get<uint8_t>("ld2");
+    log2Dims = [&]() {
+        for (uint8_t lev = 0; lev < 3; ++lev) {
+            auto maxLog2Dim = [&]() {
+                auto voxPerDimPerVol = newVoxPerVol[lev];
+                return static_cast<uint8_t>((sizeof(decltype(voxPerDimPerVol)) << 3) -
+                                            std::countl_zero(voxPerDimPerVol));
+            }();
+            if (log2Dims[lev] == 0) {
+                log2Dims[lev] = 5;
+                std::cout << std::format("Input option ld{} is invalid, ld{} is set to 5\n", lev,
+                                         lev);
+            }
+            if (log2Dims[lev] > maxLog2Dim) {
+                log2Dims[lev] = maxLog2Dim;
+                std::cout << std::format("Input option ld{} is invalid, ld{} is set to {}\n", lev,
+                                         lev, maxLog2Dim);
+            }
+        }
+        return log2Dims;
+    }();
 
     rndr.dt = .25f;
     rndr.bkgrndCol = glm::vec3{.1f, .1f, .1f};
@@ -470,10 +497,9 @@ int main(int argc, char **argv) {
                 ++cnt;
             }
 
-            std::cout << std::format("Revolving at distance {} costs {} ms (avg {} ms, avg {} fps)",
-                                     dist, totCostInMs, totCostInMs / cnt,
-                                     1000.f * cnt / totCostInMs)
-                      << std::endl;
+            std::cout << std::format(
+                "Revolving at distance {} costs {} ms (avg {} ms, avg {} fps)\n", dist, totCostInMs,
+                totCostInMs / cnt, 1000.f * cnt / totCostInMs);
         }
     }
 #endif // ENABLE_PERFORMANCE_TEST

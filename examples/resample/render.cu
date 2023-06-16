@@ -30,6 +30,8 @@ static __constant__ cudaTextureObject_t dc_tf;
 
 static dpbxvdb::VDBInfo vdbInfo;
 static __constant__ dpbxvdb::VDBInfo dc_vdbInfo;
+
+static dpbxvdb::VDBDeviceData vdbDat;
 static __constant__ dpbxvdb::VDBDeviceData dc_vdbDat;
 
 void release() {
@@ -60,8 +62,9 @@ void setRenderParam(const RenderParam &param) {
     resDesc.resType = cudaResourceTypeArray;
 }
 
-void setDPBXParam(const dpbxvdb::VDBInfo &vdbInfo_, const dpbxvdb::VDBDeviceData &vdbDat) {
+void setDPBXParam(const dpbxvdb::VDBInfo &vdbInfo_, const dpbxvdb::VDBDeviceData &vdbDat_) {
     vdbInfo = vdbInfo_;
+    vdbDat = vdbDat_;
     CUDACheck(cudaMemcpyToSymbol(dc_vdbInfo, &vdbInfo, sizeof(vdbInfo)));
     CUDACheck(cudaMemcpyToSymbol(dc_vdbDat, &vdbDat, sizeof(vdbDat)));
 }
@@ -296,7 +299,7 @@ __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm:
     tMaxStk[lev] = tStart.y - Epsilon;
 
     IDTy nodeIdxStk[MaxLevNum];
-    auto &node = dc_vdbDat.nodePools[lev][0];
+    auto node = dc_vdbDat.nodePools[lev][0];
     nodeIdxStk[lev] = 0;
 
     HDDA3D hdda;
@@ -307,7 +310,7 @@ __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm:
     auto alpha = 0.f;
 
     while (true) {
-        auto stop = lev > dc_vdbInfo.topLev;
+        auto stop = false;
 #pragma unroll
         for (uint8_t xyz = 0; xyz < 3; ++xyz)
             if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
@@ -342,13 +345,16 @@ __global__ void renderKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj, glm:
         } else
             hdda.Step();
 
-        while (hdda.t.x > tMaxStk[lev] && lev <= dc_vdbInfo.topLev) {
+        while (hdda.t.x > tMaxStk[lev]) {
             ++lev;
             if (lev <= dc_vdbInfo.topLev) {
                 node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
                 hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
-            }
+            } else
+                break;
         }
+        if (lev > dc_vdbInfo.topLev)
+            break;
     }
 
 #pragma unroll
@@ -381,7 +387,7 @@ __global__ void renderDepthKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj,
     tMaxStk[lev] = tStart.y - Epsilon;
 
     IDTy nodeIdxStk[MaxLevNum];
-    auto &node = dc_vdbDat.nodePools[lev][0];
+    auto node = dc_vdbDat.nodePools[lev][0];
     nodeIdxStk[lev] = 0;
 
     HDDA3D hdda;
@@ -391,7 +397,7 @@ __global__ void renderDepthKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj,
     auto rgb = glm::zero<glm::vec3>();
     auto alpha = 0.f;
     while (true) {
-        auto stop = lev > dc_vdbInfo.topLev;
+        auto stop = false;
 #pragma unroll
         for (uint8_t xyz = 0; xyz < 3; ++xyz)
             if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
@@ -432,13 +438,16 @@ __global__ void renderDepthKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj,
         } else
             hdda.Step();
 
-        while (hdda.t.x > tMaxStk[lev] && lev <= dc_vdbInfo.topLev) {
+        while (hdda.t.x > tMaxStk[lev]) {
             ++lev;
             if (lev <= dc_vdbInfo.topLev) {
                 node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
                 hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
-            }
+            } else
+                break;
         }
+        if (lev > dc_vdbInfo.topLev)
+            break;
     }
 
     mixForeBackGround(rgb, alpha);
@@ -469,7 +478,7 @@ __global__ void renderSkipTimeDiffKernel(cudaSurfaceObject_t outSurf, glm::mat4 
     tMaxStk[lev] = tStart.y - Epsilon;
 
     IDTy nodeIdxStk[MaxLevNum];
-    auto &node = dc_vdbDat.nodePools[lev][0];
+    auto node = dc_vdbDat.nodePools[lev][0];
     nodeIdxStk[lev] = 0;
 
     HDDA3D hdda;
@@ -526,7 +535,7 @@ __global__ void renderSkipTimeDiffKernel(cudaSurfaceObject_t outSurf, glm::mat4 
     };
 
     while (true) {
-        auto stop = lev > dc_vdbInfo.topLev;
+        auto stop = false;
 #pragma unroll
         for (uint8_t xyz = 0; xyz < 3; ++xyz)
             if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
@@ -558,13 +567,16 @@ __global__ void renderSkipTimeDiffKernel(cudaSurfaceObject_t outSurf, glm::mat4 
         } else
             hdda.Step();
 
-        while (hdda.t.x > tMaxStk[lev] && lev <= dc_vdbInfo.topLev) {
+        while (hdda.t.x > tMaxStk[lev]) {
             ++lev;
             if (lev <= dc_vdbInfo.topLev) {
                 node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
                 hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
-            }
+            } else
+                break;
         }
+        if (lev > dc_vdbInfo.topLev)
+            break;
     }
 
     mixForeBackGround(rgb, alpha);
@@ -594,7 +606,7 @@ __global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj,
     tMaxStk[lev] = tStart.y - Epsilon;
 
     IDTy nodeIdxStk[MaxLevNum];
-    auto &node = dc_vdbDat.nodePools[lev][0];
+    auto node = dc_vdbDat.nodePools[lev][0];
     nodeIdxStk[lev] = 0;
 
     HDDA3D hdda;
@@ -610,7 +622,7 @@ __global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj,
         alpha = 1.f;
     } else
         while (true) {
-            auto stop = lev > dc_vdbInfo.topLev;
+            auto stop = false;
 #pragma unroll
             for (uint8_t xyz = 0; xyz < 3; ++xyz)
                 if (hdda.chIdx3[xyz] < 0 || hdda.chIdx3[xyz] >= dc_vdbInfo.dims[lev]) {
@@ -640,13 +652,16 @@ __global__ void renderBrickKernel(cudaSurfaceObject_t outSurf, glm::mat4 unProj,
             } else
                 hdda.Step();
 
-            while (hdda.t.x > tMaxStk[lev] && lev <= dc_vdbInfo.topLev) {
+            while (hdda.t.x > tMaxStk[lev]) {
                 ++lev;
                 if (lev <= dc_vdbInfo.topLev) {
                     node = dc_vdbDat.nodePools[lev][nodeIdxStk[lev]];
                     hdda.Prepare(node.idx3, dc_vdbInfo.vDlts[lev]);
-                }
+                } else
+                    break;
             }
+            if (lev > dc_vdbInfo.topLev)
+                break;
         }
 
     mixForeBackGround(rgb, alpha);

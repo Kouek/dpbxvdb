@@ -5,6 +5,7 @@
 #include <bitset>
 #include <queue>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 #include <cuda.h>
@@ -29,7 +30,7 @@ class Tree {
 
     DownsamplePolicy downsamplePolicy = DownsamplePolicy::Avg;
     IDTy rootID = UndefID;
-    std::array<CoordValTy, MaxLevNum> chNums{0, 0, 0};
+    std::array<ChildIdxTy, MaxLevNum> chNums{0, 0, 0};
     std::array<CoordTy, MaxLevNum> coverVoxes;
 
     VDBInfo info;
@@ -71,7 +72,7 @@ class Tree {
         for (uint8_t lev = 0; lev < MaxLevNum; ++lev) {
             info.log2Dims[lev] = log2Dims[lev];
             info.dims[lev] = static_cast<CoordValTy>(1) << log2Dims[lev];
-            chNums[lev] = static_cast<CoordValTy>(info.dims[lev]) * info.dims[lev] * info.dims[lev];
+            chNums[lev] = static_cast<ChildIdxTy>(info.dims[lev]) * info.dims[lev] * info.dims[lev];
             coverVoxes[lev] =
                 lev > 0 ? info.dims[lev] * coverVoxes[lev - 1] : CoordTy{info.dims[lev]};
             info.vDlts[lev] = glm::vec3(coverVoxes[lev]) / glm::vec3(info.dims[lev]);
@@ -142,6 +143,90 @@ class Tree {
         setState(State::NeedRebuild, false);
     }
 
+    std::vector<std::tuple<IDTy, IDTy>> CheckTop2Down() {
+        struct Link {
+            IDTy ch, par;
+            Link(IDTy chID, IDTy parID) : ch(chID), par(parID) {}
+
+            bool operator==(const Link &right) const {
+                return this->ch == right.ch && this->par == right.par;
+            }
+        };
+        struct HashLink {
+            size_t operator()(const Link &lnk) const {
+                return std::hash<IDTy>()(lnk.par) ^ std::hash<IDTy>()(lnk.ch);
+            }
+        };
+        std::unordered_set<Link, HashLink> lnks;
+
+        // From down to top
+        for (uint8_t lev = 0; lev < info.topLev; ++lev) {
+            auto &pool = nodePools[lev];
+            for (IDTy idx = 0; idx < pool.size(); ++idx) {
+                auto id = Node::GetID(lev, idx);
+                lnks.emplace(id, pool[idx].par);
+            }
+        }
+
+        // From top to down, check
+        std::vector<std::tuple<IDTy, IDTy>> ret;
+        for (uint8_t lev = info.topLev; lev > 0; --lev) {
+            auto &pool = nodePools[lev];
+            for (IDTy idx = 0; idx < pool.size(); ++idx) {
+                auto id = Node::GetID(lev, idx);
+                auto chListStart = pool[idx].chList;
+                for (ChildIdxTy chIdx = 0; chIdx < chNums[lev]; ++chIdx)
+                    if (auto chID = chListPool[chListStart + chIdx]; chID != UndefID)
+                        if (lnks.count({chID, id}) == 0)
+                            ret.emplace_back(chID, id);
+            }
+        }
+
+        return ret;
+    }
+
+    std::vector<std::tuple<IDTy, IDTy>> CheckDown2Top() {
+        struct Link {
+            IDTy ch, par;
+            Link(IDTy chID, IDTy parID) : ch(chID), par(parID) {}
+
+            bool operator==(const Link &right) const {
+                return this->ch == right.ch && this->par == right.par;
+            }
+        };
+        struct HashLink {
+            size_t operator()(const Link &lnk) const {
+                return std::hash<IDTy>()(lnk.par) ^ std::hash<IDTy>()(lnk.ch);
+            }
+        };
+        std::unordered_set<Link, HashLink> lnks;
+
+        // From top to down
+        for (uint8_t lev = info.topLev; lev > 0; --lev) {
+            auto &pool = nodePools[lev];
+            for (IDTy idx = 0; idx < pool.size(); ++idx) {
+                auto id = Node::GetID(lev, idx);
+                auto chListStart = pool[idx].chList;
+                for (ChildIdxTy chIdx = 0; chIdx < chNums[lev]; ++chIdx)
+                    if (auto chID = chListPool[chListStart + chIdx]; chID != UndefID)
+                        lnks.emplace(chID, id);
+            }
+        }
+
+        // From down to top, check
+        std::vector<std::tuple<IDTy, IDTy>> ret;
+        for (uint8_t lev = 0; lev < info.topLev; ++lev) {
+            auto &pool = nodePools[lev];
+            for (IDTy idx = 0; idx < pool.size(); ++idx) {
+                auto id = Node::GetID(lev, idx);
+                if (lnks.count({id, pool[idx].par}) == 0)
+                    ret.emplace_back(id, pool[idx].par);
+            }
+        }
+
+        return ret;
+    }
+
   private:
     void uploadDeviceData() {
         for (uint8_t lev = 0; lev < MaxLevNum; ++lev) {
@@ -151,6 +236,7 @@ class Tree {
             d_nodePools[lev] = nodePools[lev];
             devDat.nodePools[lev] = thrust::raw_pointer_cast(d_nodePools[lev].data());
         }
+
         d_chListPool = chListPool;
         devDat.chListPool = thrust::raw_pointer_cast(d_chListPool.data());
         d_atlasMaps = atlasMaps;
@@ -164,7 +250,9 @@ class Tree {
     ChildIdxTy getChildIndexInNode(IDTy nodeID, const CoordTy &pos) {
         auto &node = getNode(nodeID);
         auto &cover = coverVoxes[node.lev];
-        if (pos.x >= node.idx3.x && pos.y >= node.idx3.y && pos.z >= node.idx3.z) {
+        auto nodeIdx3UpLim = node.idx3 + cover;
+        if (pos.x >= node.idx3.x && pos.y >= node.idx3.y && pos.z >= node.idx3.z &&
+            pos.x < nodeIdx3UpLim.x && pos.y < nodeIdx3UpLim.y && pos.z < nodeIdx3UpLim.z) {
             auto posInBrick = (pos - node.idx3) /
                               (node.lev == 0 ? glm::one<CoordTy>() : coverVoxes[node.lev - 1]);
             if (posInBrick.x < cover.x && posInBrick.y < cover.y && posInBrick.z < cover.z)
@@ -277,18 +365,18 @@ class Tree {
                 return chID;
             return activateSpace(chID, pos, stopNodeID, stopLev);
         } else {
-            auto parParID = par.par;
-            if (parParID == UndefID) {
-                parParID = reparent(parID, pos);
-                if (parParID == UndefID)
+            auto newParID = par.par;
+            if (newParID == UndefID) {
+                newParID = reparent(parID, pos);
+                if (newParID == UndefID)
                     return UndefID;
             }
-            return activateSpace(parParID, pos, stopNodeID, stopLev);
+            return activateSpace(newParID, pos, stopNodeID, stopLev);
         }
     }
 
   private:
-    void reserveAtlas(const CoordTy &voxPerAtlasNew) {
+    void reserveAtlas(const CoordTy &newVoxPerAtlas) {
         if (atlasResDesc.res.array.array) {
             CUDACheck(cudaDestroyTextureObject(atlasTex));
             CUDACheck(cudaDestroySurfaceObject(atlasSurf));
@@ -298,7 +386,7 @@ class Tree {
         }
 
         if (atlasArr &&
-            (info.voxPerAtlas.x != voxPerAtlasNew.x || info.voxPerAtlas.y != voxPerAtlasNew.y)) {
+            (info.voxPerAtlas.x != newVoxPerAtlas.x || info.voxPerAtlas.y != newVoxPerAtlas.y)) {
             // Atlas should only increase on Z-axis
             CUDACheck(cudaFreeArray(atlasArr));
             atlasArr = nullptr;
@@ -320,9 +408,9 @@ class Tree {
 
         auto chnlDesc = cudaCreateChannelDesc<float>();
         cudaExtent extent;
-        extent.width = info.voxPerAtlas.x = voxPerAtlasNew.x;
-        extent.height = info.voxPerAtlas.y = voxPerAtlasNew.y;
-        extent.depth = info.voxPerAtlas.z = voxPerAtlasNew.z;
+        extent.width = info.voxPerAtlas.x = newVoxPerAtlas.x;
+        extent.height = info.voxPerAtlas.y = newVoxPerAtlas.y;
+        extent.depth = info.voxPerAtlas.z = newVoxPerAtlas.z;
         info.brickPerAtlas.x = info.voxPerAtlas.x / info.voxPerAtlasBrick;
         info.brickPerAtlas.y = info.voxPerAtlas.y / info.voxPerAtlasBrick;
         info.brickPerAtlas.z = info.voxPerAtlas.z / info.voxPerAtlasBrick;
@@ -349,9 +437,9 @@ class Tree {
     }
     void allocAtlasBrick(IDTy leafID) {
         if (availableAtlasBrickIDs.empty()) {
-            auto voxPerAtlasNew = info.voxPerAtlas;
-            voxPerAtlasNew.z += info.voxPerAtlasBrick;
-            reserveAtlas(voxPerAtlasNew);
+            auto newVoxPerAtlas = info.voxPerAtlas;
+            newVoxPerAtlas.z += info.voxPerAtlasBrick;
+            reserveAtlas(newVoxPerAtlas);
         }
         auto atlasBrickID = availableAtlasBrickIDs.front();
         availableAtlasBrickIDs.pop();
@@ -395,14 +483,14 @@ class Tree {
     }
 
     void updateAtlas(const thrust::device_vector<float> &d_src) {
-        auto voxPerAtlasNew = [&]() {
+        auto newVoxPerAtlas = [&]() {
             CoordTy ret{info.dims[0] + (static_cast<CoordValTy>(info.apronWidAndDep) << 1)};
             auto brickPerAtlas = info.brickPerVol;
             brickPerAtlas.z >>= 1;
             ret *= brickPerAtlas;
             return ret;
         }();
-        reserveAtlas(voxPerAtlasNew);
+        reserveAtlas(newVoxPerAtlas);
 
         auto leafBrickNum = nodePools[0].size();
         for (IDTy idx = 0; idx < leafBrickNum; ++idx)

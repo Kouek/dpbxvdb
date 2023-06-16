@@ -11,7 +11,7 @@
 
 #include <cuda_runtime.h>
 
-#define ENABLE_PERFORMANCE_TEST
+//#define ENABLE_PERFORMANCE_TEST
 
 using DpbxRawVoxTy = uint8_t;
 

@@ -1,6 +1,9 @@
 #ifndef KOUEK_RAW_VOLUME_LOADER_H
 #define KOUEK_RAW_VOLUME_LOADER_H
 
+#include <format>
+#include <iostream>
+
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -26,6 +29,13 @@ template <typename RawVoxTy> class RawVolume {
         // width 1 is passed to configuration when dpbx method is in use.
         vdb.Configure(log2Dims, useDPBX ? 1 : 2, useDPBX);
         vdb.RebuildAsDense(src, oldVoxPerVol, axisTr);
+        
+        auto misseds = vdb.CheckTop2Down();
+        for (const auto &[ch, par] : misseds)
+            std::cerr << std::format("Miss ch:{} and par:{} in VDB top-to-down path\n", ch, par);
+        misseds = vdb.CheckDown2Top();
+        for (const auto &[ch, par] : misseds)
+            std::cerr << std::format("Miss ch:{} and par:{} in VDB down-to-top path\n", ch, par);
     }
     void LoadAsSparse(const std::string &path, const glm::uvec3 &oldVoxPerVol,
                       const RawVoxTy &threshold, bool useDPBX,
@@ -34,6 +44,13 @@ template <typename RawVoxTy> class RawVolume {
         auto src = loadSrc(path, oldVoxPerVol);
         vdb.Configure(log2Dims, useDPBX ? 1 : 2, useDPBX);
         vdb.RebuildAsSparse(src, oldVoxPerVol, rawVoxTy2Float(threshold), axisTr);
+        
+        auto misseds = vdb.CheckTop2Down();
+        for (const auto &[ch, par] : misseds)
+            std::cerr << std::format("Miss ch:{} and par:{} in VDB top-to-down path\n", ch, par);
+        misseds = vdb.CheckDown2Top();
+        for (const auto &[ch, par] : misseds)
+            std::cerr << std::format("Miss ch:{} and par:{} in VDB down-to-top path\n", ch, par);
     }
 
   private:
